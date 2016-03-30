@@ -58,11 +58,12 @@ uniform float weight[100];
 uniform vec2 resolution;
 uniform sampler2D sampler;
 
-void main() {
-    outColor = texture2D(sampler, texCoord) * weight[0];
+void main() {   
+    float lod = 3.6;
+    outColor = textureLod(sampler, texCoord, lod) * weight[0];
     for (int i = 1; i < radius; i++) {
-        outColor += texture2D(sampler, texCoord.st - vec2(0.0, offset[i]/resolution.y)) * weight[i];
-        outColor += texture2D(sampler, texCoord.st + vec2(0.0, offset[i]/resolution.y)) * weight[i];
+        outColor += textureLod(sampler, texCoord.st - vec2(0.0, offset[i]/resolution.y), lod) * weight[i];
+        outColor += textureLod(sampler, texCoord.st + vec2(0.0, offset[i]/resolution.y), lod) * weight[i];
     }
 }
 )";
@@ -160,12 +161,12 @@ static GLfloat offset[100], weight[100];
 static void build_gaussian_blur_kernel(GLint radius, GLfloat* offset, GLfloat* weight)
 {
     int sz = (radius-1)*2+5;
-    int tbl1[sz], tbl2[sz];
+    GLfloat tbl1[sz], tbl2[sz];
 
     tbl1[0] = 1;
     for (int i = 1; i < sz; i++) {
-        int* ref = i % 2 == 1 ? tbl1 : tbl2;
-        int* tbl = i % 2 == 0 ? tbl1 : tbl2;
+        GLfloat* ref = i % 2 == 1 ? tbl1 : tbl2;
+        GLfloat* tbl = i % 2 == 0 ? tbl1 : tbl2;
         tbl[0] = 1;
         for (int k = 1; k < i; k++) {
             tbl[k] = ref[k-1] + ref[k];
@@ -173,7 +174,7 @@ static void build_gaussian_blur_kernel(GLint radius, GLfloat* offset, GLfloat* w
         tbl[i] = 1;
     }
 
-    int* tbl = sz % 2 == 1 ? tbl1 : tbl2;
+    GLfloat* tbl = sz % 2 == 1 ? tbl1 : tbl2;
     GLfloat sum = powf(2, sz-1) - tbl[0] - tbl[1] - tbl[sz-1] - tbl[sz-2];
     cerr << "sum = " << sum << " ";
     for (int i = 0; i < sz; i++) {
@@ -182,7 +183,7 @@ static void build_gaussian_blur_kernel(GLint radius, GLfloat* offset, GLfloat* w
     cerr << endl;
 
     for (int i = 0; i < radius; i++) {
-        offset[i] = (GLfloat)i;
+        offset[i] = (GLfloat)i*4;
         weight[radius-i-1] = (GLfloat)tbl[i+2] / sum;
     }
 
@@ -233,9 +234,9 @@ static void gl_init()
             n == 4 ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, pixbuf);
     glGenerateMipmap(GL_TEXTURE_2D);
 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);  
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -321,6 +322,14 @@ int main(int argc, char *argv[])
         err_quit("glfwInit failed\n");
     }
 
+    auto* monitor = glfwGetPrimaryMonitor();
+    auto* mode = glfwGetVideoMode(monitor);
+
+    ctx.width = mode->width;
+    ctx.height = mode->height;
+    int wx, wy;
+    glfwGetMonitorPos(monitor, &wx, &wy);
+
     glfwWindowHint(GLFW_RESIZABLE, GL_FALSE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3); 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
@@ -330,6 +339,7 @@ int main(int argc, char *argv[])
         glfwTerminate();
         err_quit("glfwCreateWindow failed\n");
     }
+    glfwSetWindowPos(ctx.window, wx, wy);
     glfwSetKeyCallback(ctx.window, key_callback);
     glfwMakeContextCurrent(ctx.window);
 
