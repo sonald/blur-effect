@@ -4,6 +4,9 @@
 #include <GLFW/glfw3.h>
 #include <glm/glm.hpp>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 using namespace std;
 
 #define err_quit(...) do { \
@@ -18,6 +21,9 @@ static struct context {
     GLuint program;
     GLuint ts, vs;
     GLuint vao, vbo;
+    GLuint tex;
+
+    GLint sampler; // texture sampler
 
 } ctx = {
     nullptr,
@@ -29,22 +35,29 @@ const GLchar* ts_code = R"(
 #version 150
 in vec2 position;
 in vec3 vertexColor;
+in vec2 vTexCoord;
 
 out vec3 fragColor;
+out vec2 texCoord;
 
 void main() {
     gl_Position = vec4(position, 0.0, 1.0);
     fragColor = vertexColor;
+    texCoord = vTexCoord;
 }
 )";
 
 const GLchar* vs_code = R"(
 #version 150
 in vec3 fragColor;
+in vec2 texCoord;
 out vec4 outColor;
 
+uniform sampler2D sampler;
+
 void main() {
-    outColor = vec4(fragColor.rgb, 1.0);
+    //outColor = vec4(fragColor.rgb, 1.0);
+    outColor = texture2D(sampler, texCoord);
 }
 )";
 
@@ -76,8 +89,9 @@ static GLuint build_shader(const GLchar* code, GLint type)
 
 static void gl_init()
 {
-    //glfwGetFramebufferSize(ctx.window, &ctx.width, &ctx.height);
+    glfwGetFramebufferSize(ctx.window, &ctx.width, &ctx.height);
     glViewport(0, 0, ctx.width, ctx.height);
+    //glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
 
     glGenVertexArrays(1, &ctx.vao);
     glBindVertexArray(ctx.vao);
@@ -85,12 +99,40 @@ static void gl_init()
     glGenBuffers(1, &ctx.vbo);
     glBindBuffer(GL_ARRAY_BUFFER, ctx.vbo);
 
-    static GLfloat data[] = {
-        0.0f, 0.5f,   1.0f, 0.0f, 0.0f,
-        0.5f, -0.5f,  0.0f, 1.0f, 0.0f,
-        -0.5f, -0.5f, 0.0f, 0.0f, 1.0f,
+    static GLfloat vdata[] = {
+        -1.0f, 1.0f,   1.0f, 0.0f, 0.0f,  0.0f, 0.0f,
+        1.0f, 1.0f,    0.0f, 1.0f, 0.0f,  1.0f, 0.0f,
+        1.0f, -1.0f,   1.0f, 0.0f, 0.0f,  1.0f, 1.0f,
+
+        -1.0f, 1.0f,   1.0f, 0.0f, 0.0f,  0.0f, 0.0f,
+        1.0f, -1.0f,   1.0f, 0.0f, 0.0f,  1.0f, 1.0f,
+        -1.0f, -1.0f,  0.0f, 1.0f, 0.0f,  0.0f, 1.0f
     };
-    glBufferData(GL_ARRAY_BUFFER, sizeof(data), &data, GL_STATIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vdata), &vdata, GL_STATIC_DRAW);
+
+
+    glGenTextures(1, &ctx.tex);
+    glBindTexture(GL_TEXTURE_2D, ctx.tex);
+
+    int x,y,n;
+    unsigned char *pixbuf = stbi_load("./texture.jpg", &x, &y, &n, 0);
+    if (!pixbuf) {
+        err_quit("load texture.jpg failed\n");
+    }
+
+    glTexImage2D(GL_TEXTURE_2D, 0, n == 4 ? GL_RGBA : GL_RGB, x, y, 0,
+            n == 4 ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, pixbuf);
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);  
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    stbi_image_free(pixbuf);
+
 
     ctx.program = glCreateProgram();
 
@@ -110,13 +152,21 @@ static void gl_init()
 
     GLint pos_attrib = glGetAttribLocation(ctx.program, "position");
     glEnableVertexAttribArray(pos_attrib);
-    glVertexAttribPointer(pos_attrib, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat), 0);
+    glVertexAttribPointer(pos_attrib, 2, GL_FLOAT, GL_FALSE, 7 * sizeof(GLfloat), 0);
 
     GLint clr_attrib = glGetAttribLocation(ctx.program, "vertexColor");
     glEnableVertexAttribArray(clr_attrib);
-    glVertexAttribPointer(clr_attrib, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(GLfloat),
+    glVertexAttribPointer(clr_attrib, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(GLfloat),
             (const GLvoid*)(2*sizeof(GLfloat)));
+
+    GLint tex_attrib = glGetAttribLocation(ctx.program, "vTexCoord");
+    assert(tex_attrib != 0);
+    glEnableVertexAttribArray(tex_attrib);
+    glVertexAttribPointer(tex_attrib, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(GLfloat),
+            (const GLvoid*)(5*sizeof(GLfloat)));
+
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
 }
 
 static void render()
@@ -130,13 +180,14 @@ static void render()
         err_quit("program is invalid\n");
     }
 
-    //glClearColor(0.3, 1.0, 0.4, 1.0);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     glUseProgram(ctx.program);
     glBindVertexArray(ctx.vao);
+    //glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, ctx.tex);
 
-    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
 
     glfwSwapBuffers(ctx.window);
 }
@@ -174,12 +225,13 @@ int main(int argc, char *argv[])
     glfwShowWindow(ctx.window);
     auto time = glfwGetTime();
     while (!glfwWindowShouldClose(ctx.window)) {
-        glfwPollEvents();
 
         if (glfwGetTime() - time >= 1.0/30.0) {
             time = glfwGetTime();
             render();
         }
+        glfwWaitEvents();
+        //glfwPollEvents();
     }
 
     glfwTerminate();
