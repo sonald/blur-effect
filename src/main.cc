@@ -155,7 +155,7 @@ static GLuint build_program(int stage)
     return program;
 }
 
-static GLint radius = 10;
+static GLint radius = 7;
 static GLfloat offset[100], weight[100];
 
 static void build_gaussian_blur_kernel(GLint radius, GLfloat* offset, GLfloat* weight)
@@ -358,7 +358,11 @@ int main(int argc, char *argv[])
     glfwShowWindow(ctx.window);
     auto time = glfwGetTime();
     while (!glfwWindowShouldClose(ctx.window)) {
+        auto start = glfwGetTime();
         render();
+        glFinish();
+        auto cost = glfwGetTime() - start;
+        cerr << "cost = " << cost << endl;
 
         while (glfwGetTime() - time < 1.0/30.0) {
             glfwWaitEvents();
