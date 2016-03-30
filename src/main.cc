@@ -18,16 +18,15 @@ static struct context {
     GLFWwindow* window;
     int width, height;
 
-    GLuint program;
-    GLuint ts, vs;
+    GLuint program, programH;
     GLuint vao, vbo;
     GLuint tex;
 
-    GLint sampler; // texture sampler
-
+    GLuint fbTex; // texture attached to offscreen fb
+    GLuint fb;
 } ctx = {
     nullptr,
-    800, 600,
+    1024, 576,
     0,
 };
 
@@ -53,11 +52,41 @@ in vec3 fragColor;
 in vec2 texCoord;
 out vec4 outColor;
 
+uniform int radius;
+uniform float offset[100];
+uniform float weight[100];
+uniform vec2 resolution;
 uniform sampler2D sampler;
 
 void main() {
-    //outColor = vec4(fragColor.rgb, 1.0);
-    outColor = texture2D(sampler, texCoord);
+    outColor = texture2D(sampler, texCoord) * weight[0];
+    for (int i = 1; i < radius; i++) {
+        outColor += texture2D(sampler, texCoord.st - vec2(0.0, offset[i]/resolution.y)) * weight[i];
+        outColor += texture2D(sampler, texCoord.st + vec2(0.0, offset[i]/resolution.y)) * weight[i];
+    }
+}
+)";
+
+//FIXME: reverse texture outside?
+const GLchar* vs_code_h = R"(
+#version 150
+in vec3 fragColor;
+in vec2 texCoord;
+out vec4 outColor;
+
+uniform int radius;
+uniform float offset[100];
+uniform float weight[100];
+uniform vec2 resolution;
+uniform sampler2D sampler;
+
+void main() {
+    vec2 tc = vec2(texCoord.s, 1.0 - texCoord.t);
+    outColor = texture2D(sampler, tc) * weight[0];
+    for (int i = 1; i < radius; i++) {
+        outColor += texture2D(sampler, tc + vec2(offset[i]/resolution.x, 0.0)) * weight[i];
+        outColor += texture2D(sampler, tc - vec2(offset[i]/resolution.x, 0.0)) * weight[i];
+    }
 }
 )";
 
@@ -87,6 +116,86 @@ static GLuint build_shader(const GLchar* code, GLint type)
     return shader;
 }
 
+static GLuint build_program(int stage)
+{
+    GLuint program = glCreateProgram();
+
+    GLuint ts = build_shader(ts_code, GL_VERTEX_SHADER);
+    glAttachShader(program, ts);
+    GLuint vs = build_shader(stage == 1 ? vs_code : vs_code_h, GL_FRAGMENT_SHADER);
+    glAttachShader(program, vs);
+
+    glLinkProgram(program);
+    GLint result = GL_TRUE;
+    glGetProgramiv(program, GL_LINK_STATUS, &result);
+    if (result == GL_FALSE) {
+        GLchar log[1024];
+        glGetProgramInfoLog(program, sizeof log - 1, NULL, log);
+        cerr << log << endl;
+    }
+
+    GLint pos_attrib = glGetAttribLocation(program, "position");
+    glEnableVertexAttribArray(pos_attrib);
+    glVertexAttribPointer(pos_attrib, 2, GL_FLOAT, GL_FALSE, 7 * sizeof(GLfloat), 0);
+
+    GLint clr_attrib = glGetAttribLocation(program, "vertexColor");
+    if (clr_attrib >= 0) {
+        glEnableVertexAttribArray(clr_attrib);
+        glVertexAttribPointer(clr_attrib, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(GLfloat),
+                (const GLvoid*)(2*sizeof(GLfloat)));
+    }
+
+    GLint tex_attrib = glGetAttribLocation(program, "vTexCoord");
+    assert(tex_attrib != 0);
+    glEnableVertexAttribArray(tex_attrib);
+    glVertexAttribPointer(tex_attrib, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(GLfloat),
+            (const GLvoid*)(5*sizeof(GLfloat)));
+
+    return program;
+}
+
+static GLint radius = 10;
+static GLfloat offset[100], weight[100];
+
+static void build_gaussian_blur_kernel(GLint radius, GLfloat* offset, GLfloat* weight)
+{
+    int sz = (radius-1)*2+5;
+    int tbl1[sz], tbl2[sz];
+
+    tbl1[0] = 1;
+    for (int i = 1; i < sz; i++) {
+        int* ref = i % 2 == 1 ? tbl1 : tbl2;
+        int* tbl = i % 2 == 0 ? tbl1 : tbl2;
+        tbl[0] = 1;
+        for (int k = 1; k < i; k++) {
+            tbl[k] = ref[k-1] + ref[k];
+        }
+        tbl[i] = 1;
+    }
+
+    int* tbl = sz % 2 == 1 ? tbl1 : tbl2;
+    GLfloat sum = powf(2, sz-1) - tbl[0] - tbl[1] - tbl[sz-1] - tbl[sz-2];
+    cerr << "sum = " << sum << " ";
+    for (int i = 0; i < sz; i++) {
+        cerr << tbl[i] << " ";
+    }
+    cerr << endl;
+
+    for (int i = 0; i < radius; i++) {
+        offset[i] = (GLfloat)i;
+        weight[radius-i-1] = (GLfloat)tbl[i+2] / sum;
+    }
+
+    for (int i = 0; i < radius; i++) {
+        cerr << offset[i] << " ";
+    }
+    cerr << endl;
+    for (int i = 0; i < radius; i++) {
+        cerr << weight[i] << " ";
+    }
+    cerr << endl;
+}
+
 static void gl_init()
 {
     glfwGetFramebufferSize(ctx.window, &ctx.width, &ctx.height);
@@ -100,13 +209,13 @@ static void gl_init()
     glBindBuffer(GL_ARRAY_BUFFER, ctx.vbo);
 
     static GLfloat vdata[] = {
-        -1.0f, 1.0f,   1.0f, 0.0f, 0.0f,  0.0f, 0.0f,
-        1.0f, 1.0f,    0.0f, 1.0f, 0.0f,  1.0f, 0.0f,
-        1.0f, -1.0f,   1.0f, 0.0f, 0.0f,  1.0f, 1.0f,
+        -1.0f, 1.0f,   1.0f, 0.0f, 0.0f,  0.0f, 1.0f,
+        1.0f, 1.0f,    0.0f, 1.0f, 0.0f,  1.0f, 1.0f,
+        1.0f, -1.0f,   1.0f, 0.0f, 0.0f,  1.0f, 0.0f,
 
-        -1.0f, 1.0f,   1.0f, 0.0f, 0.0f,  0.0f, 0.0f,
-        1.0f, -1.0f,   1.0f, 0.0f, 0.0f,  1.0f, 1.0f,
-        -1.0f, -1.0f,  0.0f, 1.0f, 0.0f,  0.0f, 1.0f
+        -1.0f, 1.0f,   1.0f, 0.0f, 0.0f,  0.0f, 1.0f,
+        1.0f, -1.0f,   1.0f, 0.0f, 0.0f,  1.0f, 0.0f,
+        -1.0f, -1.0f,  0.0f, 1.0f, 0.0f,  0.0f, 0.0f
     };
     glBufferData(GL_ARRAY_BUFFER, sizeof(vdata), &vdata, GL_STATIC_DRAW);
 
@@ -124,69 +233,83 @@ static void gl_init()
             n == 4 ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, pixbuf);
     glGenerateMipmap(GL_TEXTURE_2D);
 
-    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);  
-    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);  
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     glBindTexture(GL_TEXTURE_2D, 0);
-
     stbi_image_free(pixbuf);
 
 
-    ctx.program = glCreateProgram();
+    glGenTextures(1, &ctx.fbTex);
+    glBindTexture(GL_TEXTURE_2D, ctx.fbTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ctx.width, ctx.height,
+            0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(GL_TEXTURE_2D, 0);
 
-    ctx.ts = build_shader(ts_code, GL_VERTEX_SHADER);
-    glAttachShader(ctx.program, ctx.ts);
-    ctx.vs = build_shader(vs_code, GL_FRAGMENT_SHADER);
-    glAttachShader(ctx.program, ctx.vs);
+    glGenFramebuffers(1, &ctx.fb);
+    glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ctx.fbTex, 0);
 
-    glLinkProgram(ctx.program);
-    GLint result = GL_TRUE;
-    glGetProgramiv(ctx.program, GL_LINK_STATUS, &result);
-    if (result == GL_FALSE) {
-        GLchar log[1024];
-        glGetProgramInfoLog(ctx.program, sizeof log - 1, NULL, log);
-        cerr << log << endl;
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        err_quit("framebuffer create failed\n");
     }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    GLint pos_attrib = glGetAttribLocation(ctx.program, "position");
-    glEnableVertexAttribArray(pos_attrib);
-    glVertexAttribPointer(pos_attrib, 2, GL_FLOAT, GL_FALSE, 7 * sizeof(GLfloat), 0);
-
-    GLint clr_attrib = glGetAttribLocation(ctx.program, "vertexColor");
-    glEnableVertexAttribArray(clr_attrib);
-    glVertexAttribPointer(clr_attrib, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(GLfloat),
-            (const GLvoid*)(2*sizeof(GLfloat)));
-
-    GLint tex_attrib = glGetAttribLocation(ctx.program, "vTexCoord");
-    assert(tex_attrib != 0);
-    glEnableVertexAttribArray(tex_attrib);
-    glVertexAttribPointer(tex_attrib, 3, GL_FLOAT, GL_FALSE, 7 * sizeof(GLfloat),
-            (const GLvoid*)(5*sizeof(GLfloat)));
+    ctx.program = build_program(1);
+    ctx.programH = build_program(2);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
+
+    build_gaussian_blur_kernel(radius, offset, weight);
 }
+
 
 static void render()
 {
     //cerr << __PRETTY_FUNCTION__ << endl;
-    glValidateProgram(ctx.program);
-
     GLint validate = GL_TRUE;
+    glValidateProgram(ctx.program);
     glGetProgramiv(ctx.program, GL_VALIDATE_STATUS, &validate);
     if (validate == GL_FALSE) {
         err_quit("program is invalid\n");
     }
 
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glValidateProgram(ctx.programH);
+    glGetProgramiv(ctx.programH, GL_VALIDATE_STATUS, &validate);
+    if (validate == GL_FALSE) {
+        err_quit("program is invalid\n");
+    }
 
-    glUseProgram(ctx.program);
+    glDisable(GL_DEPTH_TEST);
+
     glBindVertexArray(ctx.vao);
-    //glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, ctx.tex);
 
+    glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb);
+    glBindTexture(GL_TEXTURE_2D, ctx.tex);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(ctx.program);
+    glUniform1fv(glGetUniformLocation(ctx.program, "offset"), radius, offset);
+    glUniform1fv(glGetUniformLocation(ctx.program, "weight"), radius, weight);
+    glUniform1i(glGetUniformLocation(ctx.program, "radius"), radius);
+    glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
+            (GLfloat)ctx.width, (GLfloat)ctx.height);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, ctx.fbTex);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glUseProgram(ctx.programH);
+    glUniform1fv(glGetUniformLocation(ctx.program, "offset"), radius, offset);
+    glUniform1fv(glGetUniformLocation(ctx.program, "weight"), radius, weight);
+    glUniform1i(glGetUniformLocation(ctx.program, "radius"), radius);
+    glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
+            (GLfloat)ctx.width, (GLfloat)ctx.height);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
     glfwSwapBuffers(ctx.window);
@@ -225,12 +348,12 @@ int main(int argc, char *argv[])
     glfwShowWindow(ctx.window);
     auto time = glfwGetTime();
     while (!glfwWindowShouldClose(ctx.window)) {
+        render();
 
-        if (glfwGetTime() - time >= 1.0/30.0) {
-            time = glfwGetTime();
-            render();
+        while (glfwGetTime() - time < 1.0/30.0) {
+            glfwWaitEvents();
         }
-        glfwWaitEvents();
+        time = glfwGetTime();
         //glfwPollEvents();
     }
 
