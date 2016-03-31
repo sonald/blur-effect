@@ -30,8 +30,9 @@ static struct context {
     0,
 };
 
+/** shaders work on OpenGL 3.x */
 const GLchar* ts_code = R"(
-#version 150
+#version 130
 in vec2 position;
 in vec3 vertexColor;
 in vec2 vTexCoord;
@@ -47,46 +48,46 @@ void main() {
 )";
 
 const GLchar* vs_code = R"(
-#version 150
+#version 130
 in vec3 fragColor;
 in vec2 texCoord;
 out vec4 outColor;
 
-uniform int radius;
-uniform float offset[100];
-uniform float weight[100];
+// kernel[0] = radius, kernel[1-10] = offset, kernel[11-20] = weight
+uniform float kernel[21];
+
 uniform vec2 resolution;
 uniform sampler2D sampler;
 
 void main() {   
-    float lod = 3.6;
-    outColor = textureLod(sampler, texCoord, lod) * weight[0];
-    for (int i = 1; i < radius; i++) {
-        outColor += textureLod(sampler, texCoord.st - vec2(0.0, offset[i]/resolution.y), lod) * weight[i];
-        outColor += textureLod(sampler, texCoord.st + vec2(0.0, offset[i]/resolution.y), lod) * weight[i];
+    float lod = 2.6;
+    outColor = textureLod(sampler, texCoord, lod) * kernel[11];
+    for (int i = 1; i < kernel[0]; i++) {
+        outColor += textureLod(sampler, texCoord.st - vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[11+i];
+        outColor += textureLod(sampler, texCoord.st + vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[11+i];
     }
 }
 )";
 
 //FIXME: reverse texture outside?
 const GLchar* vs_code_h = R"(
-#version 150
+#version 130
 in vec3 fragColor;
 in vec2 texCoord;
 out vec4 outColor;
 
-uniform int radius;
-uniform float offset[100];
-uniform float weight[100];
+// kernel[0] = radius, kernel[1-10] = offset, kernel[11-20] = weight
+uniform float kernel[21];
+
 uniform vec2 resolution;
 uniform sampler2D sampler;
 
 void main() {
     vec2 tc = vec2(texCoord.s, 1.0 - texCoord.t);
-    outColor = texture2D(sampler, tc) * weight[0];
-    for (int i = 1; i < radius; i++) {
-        outColor += texture2D(sampler, tc + vec2(offset[i]/resolution.x, 0.0)) * weight[i];
-        outColor += texture2D(sampler, tc - vec2(offset[i]/resolution.x, 0.0)) * weight[i];
+    outColor = texture2D(sampler, tc) * kernel[11];
+    for (int i = 1; i < kernel[0]; i++) {
+        outColor += texture2D(sampler, tc + vec2(kernel[1+i]/resolution.x, 0.0)) * kernel[11+i];
+        outColor += texture2D(sampler, tc - vec2(kernel[1+i]/resolution.x, 0.0)) * kernel[11+i];
     }
 }
 )";
@@ -155,12 +156,13 @@ static GLuint build_program(int stage)
     return program;
 }
 
-static GLint radius = 7;
-static GLfloat offset[100], weight[100];
+static GLint radius = 5;
+static GLfloat kernel[40];
 
-static void build_gaussian_blur_kernel(GLint radius, GLfloat* offset, GLfloat* weight)
+static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat* weight)
 {
-    int sz = (radius-1)*2+5;
+    GLint radius = *pradius;
+    GLint sz = (radius-1)*2+5;
     GLfloat tbl1[sz], tbl2[sz];
 
     tbl1[0] = 1;
@@ -176,17 +178,21 @@ static void build_gaussian_blur_kernel(GLint radius, GLfloat* offset, GLfloat* w
 
     GLfloat* tbl = sz % 2 == 1 ? tbl1 : tbl2;
     GLfloat sum = powf(2, sz-1) - tbl[0] - tbl[1] - tbl[sz-1] - tbl[sz-2];
-    cerr << "sum = " << sum << " ";
-    for (int i = 0; i < sz; i++) {
-        cerr << tbl[i] << " ";
-    }
-    cerr << endl;
 
     for (int i = 0; i < radius; i++) {
         offset[i] = (GLfloat)i*4;
         weight[radius-i-1] = (GLfloat)tbl[i+2] / sum;
     }
 
+    //step2: interpolate
+    radius = (radius+1)/2;
+    for (int i = 1; i < radius; i++) {
+        GLfloat w = weight[i*2] + weight[i*2-1];
+        GLfloat off = (offset[i*2] * weight[i*2] + offset[i*2-1] * weight[i*2-1]) / w;
+        offset[i] = off;
+        weight[i] = w;
+    }
+    *pradius = radius;
     for (int i = 0; i < radius; i++) {
         cerr << offset[i] << " ";
     }
@@ -266,7 +272,8 @@ static void gl_init()
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
-    build_gaussian_blur_kernel(radius, offset, weight);
+    build_gaussian_blur_kernel(&radius, &kernel[1], &kernel[11]);
+    kernel[0] = radius;
 }
 
 
@@ -294,9 +301,7 @@ static void render()
     glBindTexture(GL_TEXTURE_2D, ctx.tex);
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(ctx.program);
-    glUniform1fv(glGetUniformLocation(ctx.program, "offset"), radius, offset);
-    glUniform1fv(glGetUniformLocation(ctx.program, "weight"), radius, weight);
-    glUniform1i(glGetUniformLocation(ctx.program, "radius"), radius);
+    glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 21, kernel);
     glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
             (GLfloat)ctx.width, (GLfloat)ctx.height);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -306,9 +311,10 @@ static void render()
     glBindTexture(GL_TEXTURE_2D, ctx.fbTex);
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(ctx.programH);
-    glUniform1fv(glGetUniformLocation(ctx.program, "offset"), radius, offset);
-    glUniform1fv(glGetUniformLocation(ctx.program, "weight"), radius, weight);
-    glUniform1i(glGetUniformLocation(ctx.program, "radius"), radius);
+    glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 21, kernel);
+    //glUniform1fv(glGetUniformLocation(ctx.program, "offset"), radius, offset);
+    //glUniform1fv(glGetUniformLocation(ctx.program, "weight"), radius, weight);
+    //glUniform1i(glGetUniformLocation(ctx.program, "radius"), radius);
     glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
             (GLfloat)ctx.width, (GLfloat)ctx.height);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -332,8 +338,8 @@ int main(int argc, char *argv[])
 
     glfwWindowHint(GLFW_RESIZABLE, GL_FALSE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3); 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+    //glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     ctx.window = glfwCreateWindow(ctx.width, ctx.height, "Blur Demo", NULL, NULL);
     if (!ctx.window) {
         glfwTerminate();
@@ -348,27 +354,44 @@ int main(int argc, char *argv[])
     if (glewInit() != GLEW_OK) {
         err_quit("glewInit failed\n");
     }
-    if(!GLEW_VERSION_3_2)
-        throw std::runtime_error("OpenGL 3.2 API is not available.");
+    if(!GLEW_VERSION_3_0)
+        throw std::runtime_error("OpenGL 3.x API is not available.");
 
+    if (GLEW_ARB_timer_query) {
+        cerr << "ARB_timer_query exists\n";
+    }
     glfwSwapInterval(1);
 
     gl_init();
 
+    GLuint query;
+    GLint available = 0;
+    GLuint64 timeElapsed = 0; // nanoseconds
+
+    if (GLEW_ARB_timer_query) {
+        glGenQueries(1, &query);
+    }
     glfwShowWindow(ctx.window);
     auto time = glfwGetTime();
     while (!glfwWindowShouldClose(ctx.window)) {
-        auto start = glfwGetTime();
+        if (GLEW_ARB_timer_query) glBeginQuery(GL_TIME_ELAPSED, query);
+
         render();
-        glFinish();
-        auto cost = glfwGetTime() - start;
-        cerr << "cost = " << cost << endl;
+
+        if (GLEW_ARB_timer_query) {
+            glEndQuery(GL_TIME_ELAPSED);
+            while (!available) {
+                glGetQueryObjectiv(query, GL_QUERY_RESULT_AVAILABLE, &available);
+            }
+
+            glGetQueryObjectui64v(query, GL_QUERY_RESULT, &timeElapsed);
+            cerr << "cost = " << (GLdouble)timeElapsed / 1000000.0 << endl;
+        }
 
         while (glfwGetTime() - time < 1.0/30.0) {
             glfwWaitEvents();
         }
         time = glfwGetTime();
-        //glfwPollEvents();
     }
 
     glfwTerminate();
