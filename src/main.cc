@@ -6,6 +6,8 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include "stb_image_resize.h"
 
 using namespace std;
 
@@ -26,7 +28,6 @@ static struct context {
     GLuint fb;
 } ctx = {
     nullptr,
-    1024, 576,
     0,
 };
 
@@ -236,6 +237,17 @@ static void gl_init()
         err_quit("load texture.jpg failed\n");
     }
 
+    if (x >= ctx.width && y >= ctx.height) {
+        cerr << "down scale texture\n";
+        float scale = fminf(ctx.width * 0.5 / x, ctx.height * 0.5 / y);
+        int ox = x * scale, oy = y * scale;
+        unsigned char* output = (unsigned char*)malloc(n*ox*oy);
+        stbir_resize_uint8(pixbuf, x, y, 0, output, ox, oy, 0, n);
+        stbi_image_free(pixbuf);
+        x = ox;
+        y = oy;
+        pixbuf = output;
+    }
     glTexImage2D(GL_TEXTURE_2D, 0, n == 4 ? GL_RGBA : GL_RGB, x, y, 0,
             n == 4 ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, pixbuf);
     glGenerateMipmap(GL_TEXTURE_2D);
