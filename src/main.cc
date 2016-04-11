@@ -55,18 +55,18 @@ const GLchar* vs_code = R"(
 varying vec3 fragColor;
 varying vec2 texCoord;
 
-// kernel[0] = radius, kernel[1-10] = offset, kernel[11-20] = weight
-uniform float kernel[21];
+// kernel[0] = radius, kernel[1-20] = offset, kernel[21-40] = weight
+uniform float kernel[41];
 
 uniform vec2 resolution;
 uniform sampler2D sampler;
 
 void main() {   
     float lod = 0.0;
-    gl_FragColor = texture2D(sampler, texCoord, lod) * kernel[11];
+    gl_FragColor = texture2D(sampler, texCoord, lod) * kernel[21];
     for (int i = 1; i < kernel[0]; i++) {
-        gl_FragColor += texture2D(sampler, texCoord.st - vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[11+i];
-        gl_FragColor += texture2D(sampler, texCoord.st + vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[11+i];
+        gl_FragColor += texture2D(sampler, texCoord.st - vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
+        gl_FragColor += texture2D(sampler, texCoord.st + vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
     }
 }
 )";
@@ -77,8 +77,7 @@ const GLchar* vs_code_h = R"(
 varying vec3 fragColor;
 varying vec2 texCoord;
 
-// kernel[0] = radius, kernel[1-10] = offset, kernel[11-20] = weight
-uniform float kernel[21];
+uniform float kernel[41];
 
 uniform vec2 resolution;
 uniform sampler2D sampler;
@@ -86,10 +85,10 @@ uniform sampler2D sampler;
 void main() {
     float lod = 0.0;
     vec2 tc = vec2(texCoord.s, 1.0 - texCoord.t);
-    gl_FragColor = texture2D(sampler, tc, lod) * kernel[11];
+    gl_FragColor = texture2D(sampler, tc, lod) * kernel[21];
     for (int i = 1; i < kernel[0]; i++) {
-        gl_FragColor += texture2D(sampler, tc + vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[11+i];
-        gl_FragColor += texture2D(sampler, tc - vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[11+i];
+        gl_FragColor += texture2D(sampler, tc + vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
+        gl_FragColor += texture2D(sampler, tc - vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
     }
 }
 )";
@@ -158,45 +157,42 @@ static GLuint build_program(int stage)
     return program;
 }
 
-static GLint radius = 7;
-static GLfloat kernel[40];
+// must be odd
+static GLint radius = 11;
+static GLfloat kernel[41];
 
 static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat* weight)
 {
     GLint radius = *pradius;
-    GLint sz = (radius-1)*2+5;
-    GLfloat tbl1[sz], tbl2[sz];
+    radius += (radius + 1) % 2;
+    GLint sz = (radius+2)*2-1;
+    GLint N = sz-1;
 
-    tbl1[0] = 1;
-    for (int i = 1; i < sz; i++) {
-        GLfloat* ref = i % 2 == 1 ? tbl1 : tbl2;
-        GLfloat* tbl = i % 2 == 0 ? tbl1 : tbl2;
-        tbl[0] = 1;
-        for (int k = 1; k < i; k++) {
-            tbl[k] = ref[k-1] + ref[k];
-        }
-        tbl[i] = 1;
+    GLfloat sum = powf(2, N);
+    weight[radius+1] = 1.0;
+    for (int i = 1; i < radius+2; i++) {
+        weight[radius-i+1] = weight[radius-i+2] * (N-i+1) / i;
     }
+    sum -= (weight[radius+1] + weight[radius]) * 2.0;
 
-    GLfloat* tbl = sz % 2 == 1 ? tbl1 : tbl2;
-    GLfloat sum = powf(2, sz-1) - tbl[0] - tbl[1] - tbl[sz-1] - tbl[sz-2];
+    cerr << "N = " << N << ", sum = " << sum << endl;
 
     for (int i = 0; i < radius; i++) {
         offset[i] = (GLfloat)i*4.0f;
-        weight[radius-i-1] = (GLfloat)tbl[i+2] / sum;
+        weight[i] /= sum;
     }
 
     *pradius = radius;
 
     //step2: interpolate
-    radius = (radius+1)/2;
-    for (int i = 1; i < radius; i++) {
-        float w = weight[i*2] + weight[i*2-1];
-        float off = (offset[i*2] * weight[i*2] + offset[i*2-1] * weight[i*2-1]) / w;
-        offset[i] = off;
-        weight[i] = w;
-    }
-    *pradius = radius;
+    //radius = (radius+1)/2;
+    //for (int i = 1; i < radius; i++) {
+        //float w = weight[i*2] + weight[i*2-1];
+        //float off = (offset[i*2] * weight[i*2] + offset[i*2-1] * weight[i*2-1]) / w;
+        //offset[i] = off;
+        //weight[i] = w;
+    //}
+    //*pradius = radius;
 
     for (int i = 0; i < radius; i++) {
         cerr << offset[i] << " ";
@@ -287,7 +283,7 @@ static void gl_init()
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 
-    build_gaussian_blur_kernel(&radius, &kernel[1], &kernel[11]);
+    build_gaussian_blur_kernel(&radius, &kernel[1], &kernel[21]);
     kernel[0] = radius;
 }
 
@@ -316,7 +312,7 @@ static void render()
     glBindTexture(GL_TEXTURE_2D, ctx.tex);
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(ctx.program);
-    glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 21, kernel);
+    glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 41, kernel);
     glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
             (GLfloat)ctx.width * vps, (GLfloat)ctx.height * vps);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -326,7 +322,7 @@ static void render()
     glBindTexture(GL_TEXTURE_2D, ctx.fbTex);
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(ctx.programH);
-    glUniform1fv(glGetUniformLocation(ctx.programH, "kernel"), 21, kernel);
+    glUniform1fv(glGetUniformLocation(ctx.programH, "kernel"), 41, kernel);
     glUniform2f(glGetUniformLocation(ctx.programH, "resolution"),
             (GLfloat)ctx.width, (GLfloat)ctx.height);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -400,7 +396,7 @@ int main(int argc, char *argv[])
             cerr << "cost = " << (GLdouble)timeElapsed / 1000000.0 << endl;
         }
 
-        while (glfwGetTime() - time < 1.0/30.0) {
+        while (glfwGetTime() - time < 1.0/20.0) {
             glfwWaitEvents();
         }
         time = glfwGetTime();
