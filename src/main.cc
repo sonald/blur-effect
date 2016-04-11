@@ -24,8 +24,8 @@ static struct context {
     GLuint vbo;
     GLuint tex;
 
-    GLuint fbTex; // texture attached to offscreen fb
-    GLuint fb;
+    GLuint fbTex[2]; // texture attached to offscreen fb
+    GLuint fb[2];
 } ctx = {
     nullptr,
     0,
@@ -52,6 +52,13 @@ void main() {
 
 const GLchar* vs_code = R"(
 #version 120
+#extension GL_ARB_shader_texture_lod: enable
+#ifdef GL_ARB_shader_texture_lod
+#define texpick texture2DLod
+#else
+#define texpick texture2D
+#endif
+
 varying vec3 fragColor;
 varying vec2 texCoord;
 
@@ -62,11 +69,11 @@ uniform vec2 resolution;
 uniform sampler2D sampler;
 
 void main() {   
-    float lod = 0.0;
-    gl_FragColor = texture2D(sampler, texCoord, lod) * kernel[21];
+    float lod = 4.2;
+    gl_FragColor = texpick(sampler, texCoord, lod) * kernel[21];
     for (int i = 1; i < kernel[0]; i++) {
-        gl_FragColor += texture2D(sampler, texCoord.st - vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
-        gl_FragColor += texture2D(sampler, texCoord.st + vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
+        gl_FragColor += texpick(sampler, texCoord.st - vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
+        gl_FragColor += texpick(sampler, texCoord.st + vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
     }
 }
 )";
@@ -74,6 +81,13 @@ void main() {
 //FIXME: reverse texture outside?
 const GLchar* vs_code_h = R"(
 #version 120
+#extension GL_ARB_shader_texture_lod: enable
+#ifdef GL_ARB_shader_texture_lod
+#define texpick texture2DLod
+#else
+#define texpick texture2D
+#endif
+
 varying vec3 fragColor;
 varying vec2 texCoord;
 
@@ -83,12 +97,12 @@ uniform vec2 resolution;
 uniform sampler2D sampler;
 
 void main() {
-    float lod = 0.0;
+    float lod = 4.2;
     vec2 tc = vec2(texCoord.s, 1.0 - texCoord.t);
-    gl_FragColor = texture2D(sampler, tc, lod) * kernel[21];
+    gl_FragColor = texpick(sampler, tc, lod) * kernel[21];
     for (int i = 1; i < kernel[0]; i++) {
-        gl_FragColor += texture2D(sampler, tc + vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
-        gl_FragColor += texture2D(sampler, tc - vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
+        gl_FragColor += texpick(sampler, tc + vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
+        gl_FragColor += texpick(sampler, tc - vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
     }
 }
 )";
@@ -158,8 +172,10 @@ static GLuint build_program(int stage)
 }
 
 // must be odd
-static GLint radius = 11;
+static GLint radius = 9;
 static GLfloat kernel[41];
+static GLfloat kernel2[41];
+static GLfloat kernel3[41];
 
 static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat* weight)
 {
@@ -177,22 +193,26 @@ static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat*
 
     cerr << "N = " << N << ", sum = " << sum << endl;
 
+    GLfloat bias = radius <= 5 ? 1.0 : 2.0;
     for (int i = 0; i < radius; i++) {
-        offset[i] = (GLfloat)i*4.0f;
+        offset[i] = (GLfloat)i*bias;
         weight[i] /= sum;
     }
 
     *pradius = radius;
 
-    //step2: interpolate
-    //radius = (radius+1)/2;
-    //for (int i = 1; i < radius; i++) {
-        //float w = weight[i*2] + weight[i*2-1];
-        //float off = (offset[i*2] * weight[i*2] + offset[i*2-1] * weight[i*2-1]) / w;
-        //offset[i] = off;
-        //weight[i] = w;
-    //}
-    //*pradius = radius;
+    //step2: interpolate,
+    //FIXME: this introduce some artifacts
+#if 1
+    radius = (radius+1)/2;
+    for (int i = 1; i < radius; i++) {
+        float w = weight[i*2] + weight[i*2-1];
+        float off = (offset[i*2] * weight[i*2] + offset[i*2-1] * weight[i*2-1]) / w;
+        offset[i] = off;
+        weight[i] = w;
+    }
+    *pradius = radius;
+#endif
 
     for (int i = 0; i < radius; i++) {
         cerr << offset[i] << " ";
@@ -258,24 +278,30 @@ static void gl_init()
     stbi_image_free(pixbuf);
 
 
-    glGenTextures(1, &ctx.fbTex);
-    glBindTexture(GL_TEXTURE_2D, ctx.fbTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ctx.width * vps, ctx.height * vps,
-            0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glBindTexture(GL_TEXTURE_2D, 0);
+    glGenTextures(2, ctx.fbTex);
+    for (int i = 0; i < 2; i++) {
+        glBindTexture(GL_TEXTURE_2D, ctx.fbTex[i]);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ctx.width * vps, ctx.height * vps,
+                0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        //glGenerateMipmap(GL_TEXTURE_2D);
 
-    glGenFramebuffers(1, &ctx.fb);
-    glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ctx.fbTex, 0);
-
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        err_quit("framebuffer create failed\n");
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindTexture(GL_TEXTURE_2D, 0);
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    glGenFramebuffers(2, ctx.fb);
+    for (int i = 0; i < 2; i++) {
+        glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb[i]);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ctx.fbTex[i], 0);
+
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            err_quit("framebuffer create failed\n");
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
 
     ctx.program = build_program(1);
     ctx.programH = build_program(2);
@@ -285,6 +311,14 @@ static void gl_init()
 
     build_gaussian_blur_kernel(&radius, &kernel[1], &kernel[21]);
     kernel[0] = radius;
+
+    radius = 7;
+    build_gaussian_blur_kernel(&radius, &kernel2[1], &kernel2[21]);
+    kernel2[0] = radius;
+
+    radius = 9;
+    build_gaussian_blur_kernel(&radius, &kernel3[1], &kernel3[21]);
+    kernel3[0] = radius;
 }
 
 
@@ -308,24 +342,31 @@ static void render()
 
     glDisable(GL_DEPTH_TEST);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb);
-    glBindTexture(GL_TEXTURE_2D, ctx.tex);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glUseProgram(ctx.program);
-    glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 41, kernel);
-    glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
-            (GLfloat)ctx.width * vps, (GLfloat)ctx.height * vps);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
+    int rounds = 1;
+    for (int i = 0; i < rounds; i++) {
+        GLuint tex1 = i == 0 ? ctx.tex : ctx.fbTex[1];
+        GLuint fb2 = i == rounds-1 ? 0: ctx.fb[1];
+        GLfloat* kernels = i == 0 ? &kernel[0] : (i == 1 ? &kernel2[0] : &kernel3[0]);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb[0]);
+        glBindTexture(GL_TEXTURE_2D, tex1);
+        glUseProgram(ctx.program);
+        glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 41, kernels);
+        glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
+                (GLfloat)ctx.width * vps, (GLfloat)ctx.height * vps);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
 
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, ctx.fbTex);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glUseProgram(ctx.programH);
-    glUniform1fv(glGetUniformLocation(ctx.programH, "kernel"), 41, kernel);
-    glUniform2f(glGetUniformLocation(ctx.programH, "resolution"),
-            (GLfloat)ctx.width, (GLfloat)ctx.height);
-    glDrawArrays(GL_TRIANGLES, 0, 6);
+        glBindFramebuffer(GL_FRAMEBUFFER, fb2);
+        glBindTexture(GL_TEXTURE_2D, ctx.fbTex[0]);
+        glGenerateMipmap(GL_TEXTURE_2D);
+
+        glUseProgram(ctx.programH);
+        glUniform1fv(glGetUniformLocation(ctx.programH, "kernel"), 41, kernels);
+        glUniform2f(glGetUniformLocation(ctx.programH, "resolution"),
+                (GLfloat)ctx.width, (GLfloat)ctx.height);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
 
     glfwSwapBuffers(ctx.window);
 }
@@ -396,7 +437,7 @@ int main(int argc, char *argv[])
             cerr << "cost = " << (GLdouble)timeElapsed / 1000000.0 << endl;
         }
 
-        while (glfwGetTime() - time < 1.0/20.0) {
+        while (glfwGetTime() - time < 1.0/10.0) {
             glfwWaitEvents();
         }
         time = glfwGetTime();
