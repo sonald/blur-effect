@@ -203,7 +203,7 @@ static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat*
 
     //step2: interpolate,
     //FIXME: this introduce some artifacts
-#if 1
+#if 0
     radius = (radius+1)/2;
     for (int i = 1; i < radius; i++) {
         float w = weight[i*2] + weight[i*2-1];
@@ -411,8 +411,6 @@ int main(int argc, char *argv[])
     }
     glfwSwapInterval(1);
 
-    gl_init();
-
     GLuint query;
     GLint available = 0;
     GLuint64 timeElapsed = 0; // nanoseconds
@@ -420,22 +418,35 @@ int main(int argc, char *argv[])
     if (GLEW_ARB_timer_query) {
         glGenQueries(1, &query);
     }
+
+#define query_timer() do { \
+    if (GLEW_ARB_timer_query) glBeginQuery(GL_TIME_ELAPSED, query); \
+} while (0)
+
+#define end_timer() do { \
+        if (GLEW_ARB_timer_query) {     \
+            glEndQuery(GL_TIME_ELAPSED);    \
+            while (!available) {    \
+                glGetQueryObjectiv(query, GL_QUERY_RESULT_AVAILABLE, &available);   \
+            }   \
+    \
+            glGetQueryObjectui64v(query, GL_QUERY_RESULT, &timeElapsed);    \
+            cerr << "cost = " << (GLdouble)timeElapsed / 1000000.0 << endl;     \
+        }   \
+} while (0)
+
+    query_timer();
+    gl_init();
+    end_timer();
+
     glfwShowWindow(ctx.window);
     auto time = glfwGetTime();
     while (!glfwWindowShouldClose(ctx.window)) {
-        if (GLEW_ARB_timer_query) glBeginQuery(GL_TIME_ELAPSED, query);
+        query_timer();
 
         render();
 
-        if (GLEW_ARB_timer_query) {
-            glEndQuery(GL_TIME_ELAPSED);
-            while (!available) {
-                glGetQueryObjectiv(query, GL_QUERY_RESULT_AVAILABLE, &available);
-            }
-
-            glGetQueryObjectui64v(query, GL_QUERY_RESULT, &timeElapsed);
-            cerr << "cost = " << (GLdouble)timeElapsed / 1000000.0 << endl;
-        }
+        end_timer();
 
         while (glfwGetTime() - time < 1.0/10.0) {
             glfwWaitEvents();
