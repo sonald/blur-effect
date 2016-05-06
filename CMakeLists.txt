@@ -14,11 +14,7 @@ set(blur-exps_VERSION_MINOR 1)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLEW REQUIRED glew)
 pkg_check_modules(GLFW REQUIRED glfw3)
-
-#pkg_check_modules(GLM REQUIRED glm)
-if (NOT EXISTS /usr/include/glm)
-    message(SEND_ERROR "-- missing glm headers, plz install glm first")
-endif()
+pkg_check_modules(PIXBUF REQUIRED gdk-pixbuf-2.0)
 
 # Find includes in corresponding build directories
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
@@ -27,11 +23,14 @@ include_directories(${PROJECT_BINARY_DIR})
 include_directories(${PROJECT_SOURCE_DIR})
 include_directories(${GLFW_INCLUDE_DIRS})
 include_directories(${GLEW_INCLUDE_DIRS})
+include_directories(${PIXBUF_INCLUDE_DIRS})
 
-file(GLOB SRCS src/*.cc)
-
-add_executable(${target} ${SRCS})
+add_executable(${target} src/main.cc)
 target_link_libraries(${target} ${GLFW_LIBRARIES} ${GLEW_LIBRARIES})
+
+add_executable(blur_image src/blur_image.cc)
+target_link_libraries(blur_image ${GLFW_LIBRARIES} ${GLEW_LIBRARIES} 
+    ${PIXBUF_LIBRARIES})
 
 # install stage
 install(TARGETS ${target} ${client} RUNTIME DESTINATION bin)
