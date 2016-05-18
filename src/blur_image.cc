@@ -1,7 +1,13 @@
+#include <stdio.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <iostream>
-#define GLEW_STATIC
-#include <GL/glew.h>
-#include <GLFW/glfw3.h>
+
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <GLES3/gl3.h>
+//#include <GLES3/gl3ext.h>
+#include <EGL/egl.h>
 #include <glib.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
 
@@ -16,7 +22,10 @@ using namespace std;
 } while (0)
 
 static struct context {
-    GLFWwindow* window;
+    EGLDisplay display;
+    EGLContext gl_context;
+
+    EGLSurface surface;
 
     char* img_path;
     int width, height, ncomp;
@@ -29,21 +38,24 @@ static struct context {
     GLuint fbTex[2]; // texture attached to offscreen fb
     GLuint fb[2];
 } ctx = {
-    nullptr,
     0,
 };
 
+static int rounds = 1;
 static float vps = 1.0f;
+static char* infile = NULL, *outfile = NULL;
 
-/** shaders work on OpenGL 2.1 */
+/** shaders work on OpenGL ES 3.0 */
 const GLchar* ts_code = R"(
-#version 120
-attribute vec2 position;
-attribute vec3 vertexColor;
-attribute vec2 vTexCoord;
+#version 300 es
+precision highp float;
 
-varying vec3 fragColor;
-varying vec2 texCoord;
+in vec2 position;
+in vec3 vertexColor;
+in vec2 vTexCoord;
+
+out vec3 fragColor;
+out vec2 texCoord;
 
 void main() {
     gl_Position = vec4(position, 0.0, 1.0);
@@ -53,16 +65,14 @@ void main() {
 )";
 
 const GLchar* vs_code = R"(
-#version 120
-#extension GL_ARB_shader_texture_lod: enable
-#ifdef GL_ARB_shader_texture_lod
-#define texpick texture2DLod
-#else
-#define texpick texture2D
-#endif
+#version 300 es
+#define texpick texture
+precision highp float;
 
-varying vec3 fragColor;
-varying vec2 texCoord;
+in vec3 fragColor;
+in vec2 texCoord;
+
+out vec4 outColor;
 
 uniform float kernel[41];
 
@@ -70,40 +80,39 @@ uniform vec2 resolution;
 uniform sampler2D sampler;
 
 void main() {   
-    float lod = 4.4;
-    gl_FragColor = texpick(sampler, texCoord, lod) * kernel[21];
-    for (int i = 1; i < kernel[0]; i++) {
-        gl_FragColor += texpick(sampler, texCoord.st - vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
-        gl_FragColor += texpick(sampler, texCoord.st + vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
+    float lod = 3.8;
+    outColor = texpick(sampler, texCoord, lod) * kernel[21];
+    int limit = int(kernel[0]);
+    for (int i = 1; i < limit; i++) {
+        outColor += texpick(sampler, texCoord.st - vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
+        outColor += texpick(sampler, texCoord.st + vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
     }
 }
 )";
 
 //FIXME: reverse texture outside?
 const GLchar* vs_code_h = R"(
-#version 120
-#extension GL_ARB_shader_texture_lod: enable
-#ifdef GL_ARB_shader_texture_lod
-#define texpick texture2DLod
-#else
-#define texpick texture2D
-#endif
+#version 300 es
+#define texpick texture
+precision highp float;
 
-varying vec3 fragColor;
-varying vec2 texCoord;
+in vec3 fragColor;
+in vec2 texCoord;
 
+out vec4 outColor;
 uniform float kernel[41];
 
 uniform vec2 resolution;
 uniform sampler2D sampler;
 
 void main() {
-    float lod = 4.4;
+    float lod = 3.8;
     vec2 tc = vec2(texCoord.s, texCoord.t);
-    gl_FragColor = texpick(sampler, tc, lod) * kernel[21];
-    for (int i = 1; i < kernel[0]; i++) {
-        gl_FragColor += texpick(sampler, tc + vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
-        gl_FragColor += texpick(sampler, tc - vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
+    outColor = texpick(sampler, tc, lod) * kernel[21];
+    int limit = int(kernel[0]);
+    for (int i = 1; i < limit; i++) {
+        outColor += texpick(sampler, tc + vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
+        outColor += texpick(sampler, tc - vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
     }
 }
 )";
@@ -188,7 +197,7 @@ static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat*
 
     cerr << "N = " << N << ", sum = " << sum << endl;
 
-    GLfloat bias = radius <= 5 ? 1.0 : 2.0;
+    GLfloat bias = radius <= 5 ? 1.0 : 4.0;
     for (int i = 0; i < radius; i++) {
         offset[i] = (GLfloat)i*bias;
         weight[i] /= sum;
@@ -198,7 +207,7 @@ static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat*
 
     //step2: interpolate,
     //FIXME: this introduce some artifacts
-#if 1
+#if 0
     radius = (radius+1)/2;
     for (int i = 1; i < radius; i++) {
         float w = weight[i*2] + weight[i*2-1];
@@ -221,7 +230,6 @@ static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat*
 
 static void gl_init()
 {
-    glfwGetFramebufferSize(ctx.window, &ctx.width, &ctx.height);
     glViewport(0, 0, ctx.width, ctx.height);
 
     glGenBuffers(1, &ctx.vbo);
@@ -247,8 +255,8 @@ static void gl_init()
             ctx.ncomp == 4 ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, ctx.img_data);
     glGenerateMipmap(GL_TEXTURE_2D);
 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 4);
@@ -262,10 +270,9 @@ static void gl_init()
         glBindTexture(GL_TEXTURE_2D, ctx.fbTex[i]);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ctx.width * vps, ctx.height * vps,
                 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-        //glGenerateMipmap(GL_TEXTURE_2D);
 
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -286,18 +293,21 @@ static void gl_init()
     ctx.programH = build_program(2);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
 
     build_gaussian_blur_kernel(&radius, &kernel[1], &kernel[21]);
     kernel[0] = radius;
 
-    //radius = 7;
-    //build_gaussian_blur_kernel(&radius, &kernel2[1], &kernel2[21]);
-    //kernel2[0] = radius;
+    if (rounds > 1) {
+        radius = 7;
+        build_gaussian_blur_kernel(&radius, &kernel2[1], &kernel2[21]);
+        kernel2[0] = radius;
 
-    //radius = 9;
-    //build_gaussian_blur_kernel(&radius, &kernel3[1], &kernel3[21]);
-    //kernel3[0] = radius;
+        if (rounds > 2) {
+            radius = 9;
+            build_gaussian_blur_kernel(&radius, &kernel3[1], &kernel3[21]);
+            kernel3[0] = radius;
+        }
+    }
 }
 
 
@@ -320,7 +330,6 @@ static void render()
 
     glDisable(GL_DEPTH_TEST);
 
-    int rounds = 1;
     for (int i = 0; i < rounds; i++) {
         GLuint tex1 = i == 0 ? ctx.tex : ctx.fbTex[1];
         GLuint fb2 = i == rounds-1 ? 0: ctx.fb[1];
@@ -338,6 +347,9 @@ static void render()
         glBindFramebuffer(GL_FRAMEBUFFER, fb2);
         glBindTexture(GL_TEXTURE_2D, ctx.fbTex[0]);
         glGenerateMipmap(GL_TEXTURE_2D);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 4);
 
         glUseProgram(ctx.programH);
         glUniform1fv(glGetUniformLocation(ctx.programH, "kernel"), 41, kernels);
@@ -356,6 +368,8 @@ static void render()
             ctx.height, ctx.width * 4, NULL, NULL);
 
     string new_path = string("blurred.") + ctx.img_path;
+    if (outfile) new_path = outfile;
+    cout << "new_path: " << new_path << endl;
     auto suffix = new_path.substr(new_path.find_last_of('.')+1, new_path.size());
     if (suffix == "jpg" || suffix.empty()) suffix = "jpeg";
 
@@ -364,79 +378,115 @@ static void render()
         err_quit("%s\n", error->message);
     }
 
-    //glfwSwapBuffers(ctx.window);
+}
+
+static void setup_context()
+{
+    EGLint major;
+    EGLint minor;
+    const char *ver, *extensions;
+
+    ctx.display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    eglInitialize(ctx.display, &major, &minor);
+    ver = eglQueryString(ctx.display, EGL_VERSION);
+    extensions = eglQueryString(ctx.display, EGL_EXTENSIONS);
+    //printf("ver: %s, ext: %s\n", ver, extensions);
+
+    if (!strstr(extensions, "EGL_KHR_surfaceless_context")) {
+        err_quit("%s\n", "need EGL_KHR_surfaceless_context extension");
+    }
+
+    if (!eglBindAPI(EGL_OPENGL_ES_API)) {
+        std::cerr << "bind api failed" << std::endl;
+        exit(-1);
+    }
+
+    static const EGLint conf_att[] = {
+        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_NONE,
+    };
+    static const EGLint ctx_att[] = {
+        EGL_CONTEXT_CLIENT_VERSION, 3,
+        EGL_NONE
+    };
+
+    EGLConfig conf;
+    int num_conf;
+    EGLBoolean ret = eglChooseConfig(ctx.display, conf_att, &conf, 1, &num_conf);
+    if (!ret || num_conf != 1) {
+        printf("cannot find a proper EGL framebuffer configuration");
+        exit(-1);
+    }
+
+    ctx.gl_context = eglCreateContext(ctx.display, conf, EGL_NO_CONTEXT, ctx_att);
+    if (ctx.gl_context == EGL_NO_CONTEXT) {
+        printf("no context created.\n"); exit(0);
+    }
+
+    static const EGLint pbuf_attrs[] = {
+        EGL_WIDTH, ctx.width,
+        EGL_HEIGHT, ctx.height,
+        EGL_NONE
+    };
+
+    ctx.surface = eglCreatePbufferSurface(ctx.display, conf, pbuf_attrs);
+    if (ctx.surface == EGL_NO_SURFACE) {
+        printf("cannot create EGL window surface");
+        exit(-1);
+    }
+
+    if (!eglMakeCurrent(ctx.display, ctx.surface, ctx.surface, ctx.gl_context)) {
+        printf("cannot activate EGL context");
+        exit(-1);
+    }
+}
+
+static void cleanup()
+{
+    eglDestroySurface(ctx.display, ctx.surface);
+    eglDestroyContext(ctx.display, ctx.gl_context);
+    eglTerminate(ctx.display);
 }
 
 int main(int argc, char *argv[])
 {
     if (argc < 2) err_quit("usage: blur_image infile outfile\n");
-    ctx.img_path = strdup(argv[1]);
+    int ch;
+    while ((ch = getopt(argc, argv, "o:r:p:h")) != -1) {
+        switch(ch) {
+            case 'o': outfile = strdup(optarg); break;
+            case 'r': radius = atoi(optarg); break;
+            case 'p': rounds = atoi(optarg); break;
+            case 'h': 
+            default:
+                      err_quit("usage: blur_image infile -o outfile \n"
+                              "\t[-r radius] radius now should be odd number ranging [3-19]\n"
+                              "\t[-p rendering passes] iterate passes of rendering, raning [1-3]\n");
+
+        }
+    }
+
+    if (optind < argc && !infile) {
+        infile = strdup(argv[optind]);
+    }
+
+    cout << "outfile: " << outfile << ", infile: " << infile << ", r: " << radius << ", p: " << rounds << endl;
+    ctx.img_path = strdup(infile);
     ctx.img_data = stbi_load(ctx.img_path, &ctx.width, &ctx.height,
             &ctx.ncomp, 0);
     if (!ctx.img_data) {
         err_quit("load %s failed\n", ctx.img_path);
     }
 
-    if (!glfwInit()) {
-        err_quit("glfwInit failed\n");
-    }
+    setup_context();
 
-    glfwWindowHint(GLFW_RESIZABLE, GL_FALSE);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2); 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
-    ctx.window = glfwCreateWindow(ctx.width, ctx.height, "Blur Demo", NULL, NULL);
-    if (!ctx.window) {
-        glfwTerminate();
-        err_quit("glfwCreateWindow failed\n");
-    }
-    glfwMakeContextCurrent(ctx.window);
-
-    // do it after context is current
-    glewExperimental = GL_TRUE;
-    if (glewInit() != GLEW_OK) {
-        err_quit("glewInit failed\n");
-    }
-
-    if (GLEW_ARB_timer_query) {
-        cerr << "ARB_timer_query exists\n";
-    }
-    //glfwSwapInterval(1);
-
-    GLuint query;
-    GLint available = 0;
-    GLuint64 timeElapsed = 0; // nanoseconds
-
-    if (GLEW_ARB_timer_query) {
-        glGenQueries(1, &query);
-    }
-
-#define query_timer() do { \
-    if (GLEW_ARB_timer_query) glBeginQuery(GL_TIME_ELAPSED, query); \
-} while (0)
-
-#define end_timer() do { \
-        if (GLEW_ARB_timer_query) {     \
-            glEndQuery(GL_TIME_ELAPSED);    \
-            while (!available) {    \
-                glGetQueryObjectiv(query, GL_QUERY_RESULT_AVAILABLE, &available);   \
-            }   \
-    \
-            glGetQueryObjectui64v(query, GL_QUERY_RESULT, &timeElapsed);    \
-            cerr << "cost = " << (GLdouble)timeElapsed / 1000000.0 << endl;     \
-        }   \
-} while (0)
-
-    query_timer();
     gl_init();
-    end_timer();
-
-    //glfwShowWindow(ctx.window);
-
-    query_timer();
     render();
-    end_timer();
 
-    glfwTerminate();
+    free(infile);
+    free(outfile);
+    cleanup();
     return 0;
 }
 
