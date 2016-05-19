@@ -66,7 +66,7 @@ void main() {
 
 const GLchar* vs_code = R"(
 #version 300 es
-#define texpick texture
+#define texpick textureLod
 precision highp float;
 
 in vec3 fragColor;
@@ -93,7 +93,7 @@ void main() {
 //FIXME: reverse texture outside?
 const GLchar* vs_code_h = R"(
 #version 300 es
-#define texpick texture
+#define texpick textureLod
 precision highp float;
 
 in vec3 fragColor;
@@ -250,9 +250,9 @@ static void gl_init()
     glGenTextures(1, &ctx.tex);
     glBindTexture(GL_TEXTURE_2D, ctx.tex);
 
-    glTexImage2D(GL_TEXTURE_2D, 0, ctx.ncomp == 4 ? GL_RGBA : GL_RGB, 
-            ctx.width, ctx.height, 0,
-            ctx.ncomp == 4 ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, ctx.img_data);
+    GLenum pixel_fmt = ctx.ncomp == 4 ? GL_RGBA : GL_RGB;
+    glTexImage2D(GL_TEXTURE_2D, 0, pixel_fmt, ctx.width, ctx.height, 0,
+            pixel_fmt, GL_UNSIGNED_BYTE, ctx.img_data);
     glGenerateMipmap(GL_TEXTURE_2D);
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
@@ -268,8 +268,8 @@ static void gl_init()
     glGenTextures(2, ctx.fbTex);
     for (int i = 0; i < 2; i++) {
         glBindTexture(GL_TEXTURE_2D, ctx.fbTex[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ctx.width * vps, ctx.height * vps,
-                0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexImage2D(GL_TEXTURE_2D, 0, pixel_fmt, ctx.width * vps, ctx.height * vps,
+                0, pixel_fmt, GL_UNSIGNED_BYTE, NULL);
 
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -404,6 +404,10 @@ static void setup_context()
     static const EGLint conf_att[] = {
         EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_RED_SIZE, 8,
+        EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, 8,
         EGL_NONE,
     };
     static const EGLint ctx_att[] = {
@@ -449,9 +453,15 @@ static void cleanup()
     eglTerminate(ctx.display);
 }
 
+static void usage()
+{
+    err_quit("usage: blur_image infile -o outfile \n"
+            "\t[-r radius] radius now should be odd number ranging [3-19]\n"
+            "\t[-p rendering passes] iterate passes of rendering, raning [1-3]\n");
+}
+
 int main(int argc, char *argv[])
 {
-    if (argc < 2) err_quit("usage: blur_image infile outfile\n");
     int ch;
     while ((ch = getopt(argc, argv, "o:r:p:h")) != -1) {
         switch(ch) {
@@ -459,11 +469,7 @@ int main(int argc, char *argv[])
             case 'r': radius = atoi(optarg); break;
             case 'p': rounds = atoi(optarg); break;
             case 'h': 
-            default:
-                      err_quit("usage: blur_image infile -o outfile \n"
-                              "\t[-r radius] radius now should be odd number ranging [3-19]\n"
-                              "\t[-p rendering passes] iterate passes of rendering, raning [1-3]\n");
-
+            default: usage(); break;
         }
     }
 
@@ -471,10 +477,15 @@ int main(int argc, char *argv[])
         infile = strdup(argv[optind]);
     }
 
+    if (!infile || !outfile) {
+        usage();
+    }
+
     cout << "outfile: " << outfile << ", infile: " << infile << ", r: " << radius << ", p: " << rounds << endl;
     ctx.img_path = strdup(infile);
     ctx.img_data = stbi_load(ctx.img_path, &ctx.width, &ctx.height,
             &ctx.ncomp, 0);
+    cout << "image " << (ctx.ncomp == 4? "has": "has no") << " alpha" << endl;
     if (!ctx.img_data) {
         err_quit("load %s failed\n", ctx.img_path);
     }
