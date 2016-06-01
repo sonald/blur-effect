@@ -42,7 +42,6 @@ static struct context {
 };
 
 static int rounds = 1;
-static float vps = 1.0f;
 static char* infile = NULL, *outfile = NULL;
 
 /** shaders work on OpenGL ES 3.0 */
@@ -268,13 +267,18 @@ static void gl_init()
     glGenTextures(2, ctx.fbTex);
     for (int i = 0; i < 2; i++) {
         glBindTexture(GL_TEXTURE_2D, ctx.fbTex[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, pixel_fmt, ctx.width * vps, ctx.height * vps,
+        glTexImage2D(GL_TEXTURE_2D, 0, pixel_fmt, ctx.width, ctx.height,
                 0, pixel_fmt, GL_UNSIGNED_BYTE, NULL);
+        GLenum err;
+        if ((err = glGetError()) != GL_NO_ERROR) {
+            fprintf(stderr, "texture error %x\n", err);
+        }
 
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
         glBindTexture(GL_TEXTURE_2D, 0);
     }
 
@@ -340,7 +344,7 @@ static void render()
         glUseProgram(ctx.program);
         glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 41, kernels);
         glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
-                (GLfloat)ctx.width * vps, (GLfloat)ctx.height * vps);
+                (GLfloat)ctx.width, (GLfloat)ctx.height);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
 
