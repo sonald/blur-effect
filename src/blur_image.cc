@@ -6,7 +6,6 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <GLES3/gl3.h>
-//#include <GLES3/gl3ext.h>
 #include <EGL/egl.h>
 #include <glib.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
@@ -31,12 +30,14 @@ static struct context {
     int width, height, ncomp;
     unsigned char* img_data;
 
-    GLuint program, programH;
+    GLuint program, programH, programDirect;
     GLuint vbo;
     GLuint tex;
 
     GLuint fbTex[2]; // texture attached to offscreen fb
     GLuint fb[2];
+
+    float tex_width, tex_height;
 } ctx = {
     0,
 };
@@ -79,7 +80,7 @@ uniform vec2 resolution;
 uniform sampler2D sampler;
 
 void main() {   
-    float lod = 3.8;
+    float lod = 0.0;
     outColor = texpick(sampler, texCoord, lod) * kernel[21];
     int limit = int(kernel[0]);
     for (int i = 1; i < limit; i++) {
@@ -89,7 +90,6 @@ void main() {
 }
 )";
 
-//FIXME: reverse texture outside?
 const GLchar* vs_code_h = R"(
 #version 300 es
 #define texpick textureLod
@@ -105,7 +105,7 @@ uniform vec2 resolution;
 uniform sampler2D sampler;
 
 void main() {
-    float lod = 3.8;
+    float lod = 0.0;
     vec2 tc = vec2(texCoord.s, texCoord.t);
     outColor = texpick(sampler, tc, lod) * kernel[21];
     int limit = int(kernel[0]);
@@ -113,6 +113,22 @@ void main() {
         outColor += texpick(sampler, tc + vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
         outColor += texpick(sampler, tc - vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
     }
+}
+)";
+
+const GLchar* vs_direct = R"(
+#version 300 es
+precision highp float;
+
+in vec3 fragColor;
+in vec2 texCoord;
+
+out vec4 outColor;
+uniform sampler2D sampler;
+
+void main() {
+    vec2 tc = vec2(texCoord.s, texCoord.t);
+    outColor = texture(sampler, tc);
 }
 )";
 
@@ -142,7 +158,7 @@ static GLuint build_program(int stage)
 
     GLuint ts = build_shader(ts_code, GL_VERTEX_SHADER);
     glAttachShader(program, ts);
-    GLuint vs = build_shader(stage == 1 ? vs_code : vs_code_h, GL_FRAGMENT_SHADER);
+    GLuint vs = build_shader(stage == 1 ? vs_code : (stage == 2 ?vs_code_h : vs_direct), GL_FRAGMENT_SHADER);
     glAttachShader(program, vs);
 
     glLinkProgram(program);
@@ -175,10 +191,8 @@ static GLuint build_program(int stage)
 }
 
 // must be odd
-static GLint radius = 9;
+static GLint radius = 19;
 static GLfloat kernel[41];
-static GLfloat kernel2[41];
-static GLfloat kernel3[41];
 
 static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat* weight)
 {
@@ -196,7 +210,7 @@ static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat*
 
     cerr << "N = " << N << ", sum = " << sum << endl;
 
-    GLfloat bias = radius <= 5 ? 1.0 : 4.0;
+    GLfloat bias = 1.0;
     for (int i = 0; i < radius; i++) {
         offset[i] = (GLfloat)i*bias;
         weight[i] /= sum;
@@ -216,15 +230,6 @@ static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat*
     }
     *pradius = radius;
 #endif
-
-    for (int i = 0; i < radius; i++) {
-        cerr << offset[i] << " ";
-    }
-    cerr << endl;
-    for (int i = 0; i < radius; i++) {
-        cerr << weight[i] << " ";
-    }
-    cerr << endl;
 }
 
 static void gl_init()
@@ -258,7 +263,6 @@ static void gl_init()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 4);
 
     glBindTexture(GL_TEXTURE_2D, 0);
     stbi_image_free(ctx.img_data);
@@ -267,7 +271,7 @@ static void gl_init()
     glGenTextures(2, ctx.fbTex);
     for (int i = 0; i < 2; i++) {
         glBindTexture(GL_TEXTURE_2D, ctx.fbTex[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, pixel_fmt, ctx.width, ctx.height,
+        glTexImage2D(GL_TEXTURE_2D, 0, pixel_fmt, ctx.tex_width, ctx.tex_height,
                 0, pixel_fmt, GL_UNSIGNED_BYTE, NULL);
         GLenum err;
         if ((err = glGetError()) != GL_NO_ERROR) {
@@ -276,7 +280,7 @@ static void gl_init()
 
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
         glBindTexture(GL_TEXTURE_2D, 0);
@@ -295,23 +299,12 @@ static void gl_init()
 
     ctx.program = build_program(1);
     ctx.programH = build_program(2);
+    ctx.programDirect = build_program(3);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
     build_gaussian_blur_kernel(&radius, &kernel[1], &kernel[21]);
     kernel[0] = radius;
-
-    if (rounds > 1) {
-        radius = 7;
-        build_gaussian_blur_kernel(&radius, &kernel2[1], &kernel2[21]);
-        kernel2[0] = radius;
-
-        if (rounds > 2) {
-            radius = 9;
-            build_gaussian_blur_kernel(&radius, &kernel3[1], &kernel3[21]);
-            kernel3[0] = radius;
-        }
-    }
 }
 
 
@@ -334,35 +327,35 @@ static void render()
 
     glDisable(GL_DEPTH_TEST);
 
+    glViewport(0, 0, ctx.tex_width, ctx.tex_height);
     for (int i = 0; i < rounds; i++) {
         GLuint tex1 = i == 0 ? ctx.tex : ctx.fbTex[1];
-        GLuint fb2 = i == rounds-1 ? 0: ctx.fb[1];
-        GLfloat* kernels = i == 0 ? &kernel[0] : (i == 1 ? &kernel2[0] : &kernel3[0]);
+        GLfloat* kernels = &kernel[0];
 
         glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb[0]);
         glBindTexture(GL_TEXTURE_2D, tex1);
         glUseProgram(ctx.program);
         glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 41, kernels);
         glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
-                (GLfloat)ctx.width, (GLfloat)ctx.height);
+                (GLfloat)ctx.tex_width, (GLfloat)ctx.tex_height);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
 
-        glBindFramebuffer(GL_FRAMEBUFFER, fb2);
+        glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb[1]);
         glBindTexture(GL_TEXTURE_2D, ctx.fbTex[0]);
-        glGenerateMipmap(GL_TEXTURE_2D);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        //glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 4);
-
         glUseProgram(ctx.programH);
         glUniform1fv(glGetUniformLocation(ctx.programH, "kernel"), 41, kernels);
         glUniform2f(glGetUniformLocation(ctx.programH, "resolution"),
-                (GLfloat)ctx.width, (GLfloat)ctx.height);
+                (GLfloat)ctx.tex_width, (GLfloat)ctx.tex_height);
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
 
+    glViewport(0, 0, ctx.width, ctx.height);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, ctx.fbTex[1]);
+    glUseProgram(ctx.programDirect);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     char* data = (char*)malloc(ctx.width * ctx.height * 4);
     glReadPixels(0, 0, ctx.width, ctx.height, GL_RGBA, GL_UNSIGNED_BYTE, data);
@@ -493,6 +486,8 @@ int main(int argc, char *argv[])
     if (!ctx.img_data) {
         err_quit("load %s failed\n", ctx.img_path);
     }
+    ctx.tex_width = (float)ctx.width * 0.25f;
+    ctx.tex_height = (float)ctx.height * 0.25f;
 
     setup_context();
 
