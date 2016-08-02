@@ -486,8 +486,14 @@ int main(int argc, char *argv[])
     if (!ctx.img_data) {
         err_quit("load %s failed\n", ctx.img_path);
     }
-    ctx.tex_width = (float)ctx.width * 0.25f;
-    ctx.tex_height = (float)ctx.height * 0.25f;
+
+#ifdef __mips__
+    ctx.tex_width = ctx.width / 4;
+    ctx.tex_height = ctx.height / 4;
+#else
+    ctx.tex_width = ctx.width * 0.25f;
+    ctx.tex_height = ctx.height * 0.25f;
+#endif
 
     setup_context();
 
