@@ -5,7 +5,7 @@ set(target blur-exps)
 project(${target})
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS on)
-set(CMAKE_CXX_COMPILER "clang++")
+#set(CMAKE_CXX_COMPILER "clang++")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Wall")
 
 set(blur-exps_VERSION_MAJOR 0)
