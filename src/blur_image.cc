@@ -37,7 +37,7 @@ static struct context {
     GLuint fbTex[2]; // texture attached to offscreen fb
     GLuint fb[2];
 
-    float tex_width, tex_height;
+    int tex_width, tex_height;
 } ctx = {
     0,
 };
