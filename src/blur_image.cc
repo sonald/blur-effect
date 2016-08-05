@@ -30,12 +30,16 @@ static struct context {
     int width, height, ncomp;
     unsigned char* img_data;
 
-    GLuint program, programH, programDirect;
+    GLuint program, programH, programDirect, programSaveBrt, programSetBrt;
     GLuint vbo;
     GLuint tex;
 
     GLuint fbTex[2]; // texture attached to offscreen fb
     GLuint fb[2];
+
+    GLuint brtFb;
+    GLuint brtTex; // texture for brightness info
+    bool brightnessAdjusted;
 
     int tex_width, tex_height;
 } ctx = {
@@ -44,6 +48,7 @@ static struct context {
 
 static int rounds = 1;
 static char* infile = NULL, *outfile = NULL;
+bool adjustBrightness = false;
 
 /** shaders work on OpenGL ES 3.0 */
 const GLchar* ts_code = R"(
@@ -132,6 +137,45 @@ void main() {
 }
 )";
 
+const GLchar* vs_save_brightness = R"(
+#version 300 es
+precision highp float;
+
+in vec3 fragColor;
+in vec2 texCoord;
+
+out vec4 outColor;
+uniform sampler2D sampler;
+
+float brightness(vec4 c) {
+    //return dot(c.rgb, vec3(0.2126, 0.7152, 0.0722));
+    return sqrt(dot(c.rgb * c.rgb, vec3(0.241, 0.691, 0.068)));
+}
+
+void main() {
+    outColor.a = brightness(texture(sampler, texCoord.st));
+}
+)";
+
+const GLchar* vs_set_brightness = R"(
+#version 300 es
+precision highp float;
+
+in vec3 fragColor;
+in vec2 texCoord;
+
+out vec4 outColor;
+uniform sampler2D sampler;
+
+vec4 darken(vec4 c) {
+    return vec4(c.rgb * 0.8, c.a);
+}
+
+void main() {
+    outColor = darken(texture(sampler, texCoord.st));
+}
+)";
+
 static GLuint build_shader(const GLchar* code, GLint type)
 {
     GLuint shader = glCreateShader(type);
@@ -158,7 +202,11 @@ static GLuint build_program(int stage)
 
     GLuint ts = build_shader(ts_code, GL_VERTEX_SHADER);
     glAttachShader(program, ts);
-    GLuint vs = build_shader(stage == 1 ? vs_code : (stage == 2 ?vs_code_h : vs_direct), GL_FRAGMENT_SHADER);
+    const GLchar* vs_src = stage == 1 ? vs_code :
+        stage == 2 ? vs_code_h : 
+        stage == 3 ? vs_direct : 
+        stage == 4 ? vs_save_brightness : vs_set_brightness;
+    GLuint vs = build_shader(vs_src, GL_FRAGMENT_SHADER);
     glAttachShader(program, vs);
 
     glLinkProgram(program);
@@ -300,6 +348,10 @@ static void gl_init()
     ctx.program = build_program(1);
     ctx.programH = build_program(2);
     ctx.programDirect = build_program(3);
+    if (adjustBrightness) {
+        ctx.programSaveBrt = build_program(4);
+        ctx.programSetBrt = build_program(5);
+    }
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
@@ -307,6 +359,57 @@ static void gl_init()
     kernel[0] = radius;
 }
 
+static void adjust_brightness()
+{
+    glGenTextures(1, &ctx.brtTex);
+    glBindTexture(GL_TEXTURE_2D, ctx.brtTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ctx.tex_width, ctx.tex_height,
+            0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    GLenum err;
+    if ((err = glGetError()) != GL_NO_ERROR) {
+        fprintf(stderr, "texture error %x\n", err);
+    }
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &ctx.brtFb);
+    glBindFramebuffer(GL_FRAMEBUFFER, ctx.brtFb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ctx.brtTex, 0);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            err_quit("framebuffer create failed\n");
+        }
+
+    // calculate brightness
+    glBindTexture(GL_TEXTURE_2D, ctx.fbTex[1]);
+    glUseProgram(ctx.programSaveBrt);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    char* data = (char*)malloc(ctx.width * ctx.height * 4);
+    glReadPixels(0, 0, ctx.width, ctx.height, GL_RGBA, GL_UNSIGNED_BYTE, data);
+
+    int count = ctx.width * ctx.height;
+    int total = 0;
+    unsigned int* clr = (unsigned int *)data;
+    for (int i = 0; i < count; i++) {
+        total += (clr[0] >>24) & 0xff;
+    }
+
+    cerr << "brightness: " << total / count << endl;
+    if (total / count > 100) {
+        // update brightness
+        glBindTexture(GL_TEXTURE_2D, ctx.fbTex[1]);
+        glUseProgram(ctx.programSetBrt);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        ctx.brightnessAdjusted = true;
+    }
+}
 
 static void render()
 {
@@ -350,9 +453,16 @@ static void render()
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
 
+    if (adjustBrightness) {
+        adjust_brightness();
+    }
+    
     glViewport(0, 0, ctx.width, ctx.height);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    glBindTexture(GL_TEXTURE_2D, ctx.fbTex[1]);
+    if (ctx.brightnessAdjusted)
+        glBindTexture(GL_TEXTURE_2D, ctx.brtTex);
+    else
+        glBindTexture(GL_TEXTURE_2D, ctx.fbTex[1]);
     glUseProgram(ctx.programDirect);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
@@ -454,17 +564,19 @@ static void usage()
 {
     err_quit("usage: blur_image infile -o outfile \n"
             "\t[-r radius] radius now should be odd number ranging [3-19]\n"
-            "\t[-p rendering passes] iterate passes of rendering, raning [1-3]\n");
+            "\t[-b] adjust brightness after blurring\n"
+            "\t[-p rendering passes] iterate passes of rendering, raning [1-INF]\n");
 }
 
 int main(int argc, char *argv[])
 {
     int ch;
-    while ((ch = getopt(argc, argv, "o:r:p:h")) != -1) {
+    while ((ch = getopt(argc, argv, "o:r:p:bh")) != -1) {
         switch(ch) {
             case 'o': outfile = strdup(optarg); break;
             case 'r': radius = atoi(optarg); break;
             case 'p': rounds = atoi(optarg); break;
+            case 'b': adjustBrightness = true; break;
             case 'h': 
             default: usage(); break;
         }
