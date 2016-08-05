@@ -69,6 +69,62 @@ void main() {
 }
 )";
 
+#ifdef __mips__
+
+const GLchar* vs_code = R"(
+#version 300 es
+#define texpick textureLod
+precision highp float;
+
+in vec3 fragColor;
+in vec2 texCoord;
+
+out vec4 outColor;
+
+float kernel[9] = float[](0.176204,0.160186,0.120139,0.0739318,0.0369659,0.0147864,0.00462074,0.00108723,0.000181205);
+
+uniform vec2 resolution;
+uniform sampler2D sampler;
+
+void main() {
+    float lod = 0.0;
+    outColor = texpick(sampler, texCoord, lod) * kernel[0];
+    int limit = 9;
+    for (int i = 1; i < limit; i++) {
+        outColor += texpick(sampler, texCoord.st - vec2(0.0, float(i)/resolution.y), lod) * kernel[i];
+        outColor += texpick(sampler, texCoord.st + vec2(0.0, float(i)/resolution.y), lod) * kernel[i];
+    }
+}
+)";
+
+
+const GLchar* vs_code_h = R"(
+#version 300 es
+#define texpick textureLod
+precision highp float;
+
+in vec3 fragColor;
+in vec2 texCoord;
+
+out vec4 outColor;
+float kernel[9] = float[](0.176204,0.160186,0.120139,0.0739318,0.0369659,0.0147864,0.00462074,0.00108723,0.000181205);
+
+uniform vec2 resolution;
+uniform sampler2D sampler;
+
+void main() {
+    float lod = 0.0;
+    vec2 tc = vec2(texCoord.s, texCoord.t);
+    outColor = texpick(sampler, tc, lod) * kernel[0];
+    int limit = 9;
+    for (int i = 1; i < limit; i++) {
+        outColor += texpick(sampler, tc + vec2(float(i)/resolution.x, 0.0), lod) * kernel[i];
+        outColor += texpick(sampler, tc - vec2(float(i)/resolution.x, 0.0), lod) * kernel[i];
+    }
+}
+)";
+
+#else
 const GLchar* vs_code = R"(
 #version 300 es
 #define texpick textureLod
@@ -120,6 +176,8 @@ void main() {
     }
 }
 )";
+
+#endif
 
 const GLchar* vs_direct = R"(
 #version 300 es
@@ -355,8 +413,10 @@ static void gl_init()
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
+#ifndef __mips__
     build_gaussian_blur_kernel(&radius, &kernel[1], &kernel[21]);
     kernel[0] = radius;
+#endif
 }
 
 static void adjust_brightness()
@@ -433,12 +493,13 @@ static void render()
     glViewport(0, 0, ctx.tex_width, ctx.tex_height);
     for (int i = 0; i < rounds; i++) {
         GLuint tex1 = i == 0 ? ctx.tex : ctx.fbTex[1];
-        GLfloat* kernels = &kernel[0];
 
         glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb[0]);
         glBindTexture(GL_TEXTURE_2D, tex1);
         glUseProgram(ctx.program);
-        glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 41, kernels);
+#ifndef __mips__
+        glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 41, kernel);
+#endif
         glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
                 (GLfloat)ctx.tex_width, (GLfloat)ctx.tex_height);
         glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -447,7 +508,9 @@ static void render()
         glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb[1]);
         glBindTexture(GL_TEXTURE_2D, ctx.fbTex[0]);
         glUseProgram(ctx.programH);
-        glUniform1fv(glGetUniformLocation(ctx.programH, "kernel"), 41, kernels);
+#ifndef __mips__
+        glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 41, kernel);
+#endif
         glUniform2f(glGetUniformLocation(ctx.programH, "resolution"),
                 (GLfloat)ctx.tex_width, (GLfloat)ctx.tex_height);
         glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -563,7 +626,7 @@ static void cleanup()
 static void usage()
 {
     err_quit("usage: blur_image infile -o outfile \n"
-            "\t[-r radius] radius now should be odd number ranging [3-19]\n"
+            "\t[-r radius] radius now should be odd number ranging [3-19], disabled for loongson\n"
             "\t[-b] adjust brightness after blurring\n"
             "\t[-p rendering passes] iterate passes of rendering, raning [1-INF]\n");
 }
@@ -599,13 +662,8 @@ int main(int argc, char *argv[])
         err_quit("load %s failed\n", ctx.img_path);
     }
 
-#ifdef __mips__
-    ctx.tex_width = ctx.width / 4;
-    ctx.tex_height = ctx.height / 4;
-#else
     ctx.tex_width = ctx.width * 0.25f;
     ctx.tex_height = ctx.height * 0.25f;
-#endif
 
     setup_context();
 
