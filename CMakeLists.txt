@@ -30,4 +30,4 @@ add_executable(blur_image src/blur_image.cc)
 target_link_libraries(blur_image ${DEPS2_LIBRARIES})
 
 # install stage
-install(TARGETS ${target} ${client} RUNTIME DESTINATION bin)
+install(TARGETS ${target} blur_image RUNTIME DESTINATION bin)
