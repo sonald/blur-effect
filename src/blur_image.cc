@@ -3,8 +3,7 @@
 #include <unistd.h>
 #include <iostream>
 
-#include <xf86drm.h>
-#include <xf86drmMode.h>
+#include <gbm.h>
 #include <GLES3/gl3.h>
 #include <EGL/egl.h>
 #include <glib.h>
@@ -25,6 +24,11 @@ static struct context {
     EGLContext gl_context;
 
     EGLSurface surface;
+
+	int fd; // fd of drm device
+
+    struct gbm_device *gbm;
+    struct gbm_surface *gbm_surface;
 
     char* img_path;
     int width, height, ncomp;
@@ -552,11 +556,30 @@ static void render()
 
 static void setup_context()
 {
+    //open default dri device
+    string card = "/dev/dri/card0";
+    std::cerr << "open " << card << endl;
+    ctx.fd = open(card.c_str(), O_RDWR|O_CLOEXEC|O_NONBLOCK);
+    if (ctx.fd <= 0) { 
+        err_quit(strerror(errno));
+    }
+    //drmSetMaster(ctx.fd);
+
+    ctx.gbm = gbm_create_device(ctx.fd);
+    printf("backend name: %s\n", gbm_device_get_backend_name(ctx.gbm));
+
+    ctx.gbm_surface = gbm_surface_create(ctx.gbm, ctx.width,
+            ctx.height, GBM_FORMAT_XRGB8888,
+            GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+    if (!ctx.gbm_surface) {
+        printf("cannot create gbm surface (%d): %m", errno);
+        exit(-EFAULT);
+    }
+
     EGLint major;
     EGLint minor;
     const char *ver, *extensions;
-
-    ctx.display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    ctx.display = eglGetDisplay(ctx.gbm);
     eglInitialize(ctx.display, &major, &minor);
     ver = eglQueryString(ctx.display, EGL_VERSION);
     extensions = eglQueryString(ctx.display, EGL_EXTENSIONS);
@@ -572,7 +595,7 @@ static void setup_context()
     }
 
     static const EGLint conf_att[] = {
-        EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
         EGL_RED_SIZE, 8,
         EGL_GREEN_SIZE, 8,
@@ -598,13 +621,7 @@ static void setup_context()
         printf("no context created.\n"); exit(0);
     }
 
-    static const EGLint pbuf_attrs[] = {
-        EGL_WIDTH, ctx.width,
-        EGL_HEIGHT, ctx.height,
-        EGL_NONE
-    };
-
-    ctx.surface = eglCreatePbufferSurface(ctx.display, conf, pbuf_attrs);
+    ctx.surface = eglCreateWindowSurface(ctx.display, conf, (EGLNativeWindowType)ctx.gbm_surface, NULL);
     if (ctx.surface == EGL_NO_SURFACE) {
         printf("cannot create EGL window surface");
         exit(-1);
@@ -665,6 +682,7 @@ int main(int argc, char *argv[])
     ctx.tex_width = ctx.width * 0.25f;
     ctx.tex_height = ctx.height * 0.25f;
 
+    //setup_drm();
     setup_context();
 
     gl_init();

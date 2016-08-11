@@ -13,7 +13,7 @@ set(blur-exps_VERSION_MINOR 1)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(DEPS REQUIRED glew glfw3)
-pkg_check_modules(DEPS2 REQUIRED gdk-pixbuf-2.0 gbm egl glesv2)
+pkg_check_modules(DEPS2 REQUIRED gdk-pixbuf-2.0 libdrm gbm egl glesv2)
 
 # Find includes in corresponding build directories
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
@@ -27,6 +27,7 @@ add_executable(${target} src/main.cc)
 target_link_libraries(${target} ${DEPS_LIBRARIES})
 
 add_executable(blur_image src/blur_image.cc)
+message(${DEPS2_LIBRARIES})
 target_link_libraries(blur_image ${DEPS2_LIBRARIES})
 
 # install stage
