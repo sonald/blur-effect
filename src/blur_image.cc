@@ -14,8 +14,8 @@
 
 using namespace std;
 
-#define err_quit(...) do { \
-    fprintf(stderr, ##__VA_ARGS__); \
+#define err_quit(fmt, ...) do { \
+    fprintf(stderr, fmt, ## __VA_ARGS__); \
     exit(-1); \
 } while (0)
 
@@ -578,12 +578,10 @@ static void setup_context()
 
     EGLint major;
     EGLint minor;
-    const char *ver, *extensions;
+    const char *extensions;
     ctx.display = eglGetDisplay(ctx.gbm);
     eglInitialize(ctx.display, &major, &minor);
-    ver = eglQueryString(ctx.display, EGL_VERSION);
     extensions = eglQueryString(ctx.display, EGL_EXTENSIONS);
-    //printf("ver: %s, ext: %s\n", ver, extensions);
 
     if (!strstr(extensions, "EGL_KHR_surfaceless_context")) {
         err_quit("%s\n", "need EGL_KHR_surfaceless_context extension");

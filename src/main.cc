@@ -10,8 +10,8 @@
 
 using namespace std;
 
-#define err_quit(...) do { \
-    fprintf(stderr, ## __VA_ARGS__); \
+#define err_quit(fmt, ...) do { \
+    fprintf(stderr, fmt, ## __VA_ARGS__); \
     exit(-1); \
 } while (0)
 
