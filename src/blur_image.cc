@@ -51,7 +51,7 @@ static struct context {
 };
 
 static int rounds = 1;
-static char* infile = NULL, *outfile = NULL;
+static char* infile = NULL, *outfile = NULL, *drmdev = NULL;
 bool adjustBrightness = false;
 
 /** shaders work on OpenGL ES 3.0 */
@@ -558,9 +558,19 @@ static void setup_context()
 {
     //open default dri device
     string card = "/dev/dri/card0";
-    std::cerr << "open " << card << endl;
-    ctx.fd = open(card.c_str(), O_RDWR|O_CLOEXEC|O_NONBLOCK);
-    if (ctx.fd <= 0) { 
+    if (drmdev != NULL && access(drmdev, F_OK) == 0) {
+        std::cerr << "try to open " << drmdev << endl;
+        ctx.fd = open(drmdev, O_RDWR|O_CLOEXEC|O_NONBLOCK);
+        if (ctx.fd < 0) {
+            std::cerr << "fallback to open " << card << endl;
+            ctx.fd = open(card.c_str(), O_RDWR|O_CLOEXEC|O_NONBLOCK);
+        }
+    } else {
+        std::cerr << "open " << card << endl;
+        ctx.fd = open(card.c_str(), O_RDWR|O_CLOEXEC|O_NONBLOCK);
+    }
+
+    if (ctx.fd < 0) { 
         err_quit(strerror(errno));
     }
     //drmSetMaster(ctx.fd);
@@ -643,14 +653,16 @@ static void usage()
     err_quit("usage: blur_image infile -o outfile \n"
             "\t[-r radius] radius now should be odd number ranging [3-19], disabled for loongson\n"
             "\t[-b] adjust brightness after blurring\n"
+            "\t[-d drmdev] use drmdev (/dev/dri/card0 e.g) to render\n"
             "\t[-p rendering passes] iterate passes of rendering, raning [1-INF]\n");
 }
 
 int main(int argc, char *argv[])
 {
     int ch;
-    while ((ch = getopt(argc, argv, "o:r:p:bh")) != -1) {
+    while ((ch = getopt(argc, argv, "d:o:r:p:bh")) != -1) {
         switch(ch) {
+            case 'd': drmdev = strdup(optarg); break;
             case 'o': outfile = strdup(optarg); break;
             case 'r': radius = atoi(optarg); break;
             case 'p': rounds = atoi(optarg); break;
@@ -680,9 +692,7 @@ int main(int argc, char *argv[])
     ctx.tex_width = ctx.width * 0.25f;
     ctx.tex_height = ctx.height * 0.25f;
 
-    //setup_drm();
     setup_context();
-
     gl_init();
     render();
 
