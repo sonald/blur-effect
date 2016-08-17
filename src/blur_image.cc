@@ -1,6 +1,12 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <assert.h>
+#include <math.h>
+#include <string.h>
+#include <stdlib.h>
+#include <libgen.h>
+
 #include <iostream>
 #include <algorithm>
 #include <vector>
@@ -10,9 +16,6 @@
 #include <EGL/egl.h>
 #include <glib.h>
 #include <gdk-pixbuf/gdk-pixbuf.h>
-
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
 
 using namespace std;
 
@@ -377,8 +380,6 @@ static void gl_init()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     glBindTexture(GL_TEXTURE_2D, 0);
-    stbi_image_free(ctx.img_data);
-
 
     glGenTextures(2, ctx.fbTex);
     for (int i = 0; i < 2; i++) {
@@ -749,8 +750,12 @@ int main(int argc, char *argv[])
 
     cout << "outfile: " << outfile << ", infile: " << infile << ", r: " << radius << ", p: " << rounds << endl;
     ctx.img_path = strdup(infile);
-    ctx.img_data = stbi_load(ctx.img_path, &ctx.width, &ctx.height,
-            &ctx.ncomp, 0);
+    GError *error = NULL;
+    GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file(infile, &error);
+    ctx.img_data = gdk_pixbuf_get_pixels(pixbuf);
+    ctx.ncomp = gdk_pixbuf_get_n_channels(pixbuf);
+    ctx.width = gdk_pixbuf_get_width(pixbuf);
+    ctx.height = gdk_pixbuf_get_height(pixbuf);
     cout << "image " << (ctx.ncomp == 4? "has": "has no") << " alpha" << endl;
     if (!ctx.img_data) {
         err_quit("load %s failed\n", ctx.img_path);
@@ -763,6 +768,7 @@ int main(int argc, char *argv[])
     gl_init();
     render();
 
+    g_object_unref (pixbuf);
     free(infile);
     free(outfile);
     cleanup();
