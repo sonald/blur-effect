@@ -2,6 +2,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <iostream>
+#include <algorithm>
+#include <vector>
 
 #include <gbm.h>
 #include <GLES3/gl3.h>
@@ -554,26 +556,91 @@ static void render()
 
 }
 
-static void setup_context()
+static bool is_device_viable(int id)
 {
-    //open default dri device
+    char path[128];
+    snprintf(path, sizeof path, "/sys/class/drm/card%d", id);
+    if (access(path, F_OK) != 0) {
+        return false;
+    }
+
+    char buf[512];
+    snprintf(buf, sizeof buf, "%s/device/enable", path);
+    
+    FILE* fp = fopen(buf, "r");
+    if (!fp) {
+        return false;
+    }
+
+    int enabled = 0;
+    fscanf(fp, "%d", &enabled);
+    fclose(fp);
+
+    return enabled == 1;
+}
+
+static string choose_best_card(const vector<string>& vs)
+{
+    for (auto card: vs) {
+        char buf[1024] = {0};
+        int id = std::stoi(card.substr(card.size()-1));
+        snprintf(buf, sizeof buf, "/sys/class/drm/card%d/device/driver", id);
+
+        char buf2[1024] = {0};
+        readlink(buf, buf2, sizeof buf2);
+        string driver = basename(buf2);
+        if (driver == "i915") {
+            return card;
+        } 
+    }
+
+    return vs[0];
+}
+
+static void open_best_device()
+{
+    vector<string> viables;
     string card = "/dev/dri/card0";
+    const char* const tmpl = "/dev/dri/card%d";
+    for (int i = 0; i < 4; i++) {
+        char buf[128];
+        snprintf(buf, 127, tmpl, i);
+        if (is_device_viable(i)) {
+            viables.push_back(buf);
+        }
+    }
+
+    if (viables.size() == 0) {
+        err_quit("no card found\n");
+    }
+
+    card = choose_best_card(viables);
+
+    std::cerr << "try to open " << card << endl;
+    ctx.fd = open(card.c_str(), O_RDWR|O_CLOEXEC|O_NONBLOCK);
+    if (ctx.fd < 0) { 
+        err_quit(strerror(errno));
+    }
+}
+
+static void open_drm_device()
+{
     if (drmdev != NULL && access(drmdev, F_OK) == 0) {
         std::cerr << "try to open " << drmdev << endl;
         ctx.fd = open(drmdev, O_RDWR|O_CLOEXEC|O_NONBLOCK);
         if (ctx.fd < 0) {
-            std::cerr << "fallback to open " << card << endl;
-            ctx.fd = open(card.c_str(), O_RDWR|O_CLOEXEC|O_NONBLOCK);
+            open_best_device();
         }
     } else {
-        std::cerr << "open " << card << endl;
-        ctx.fd = open(card.c_str(), O_RDWR|O_CLOEXEC|O_NONBLOCK);
+        open_best_device();
     }
 
-    if (ctx.fd < 0) { 
-        err_quit(strerror(errno));
-    }
     //drmSetMaster(ctx.fd);
+}
+
+static void setup_context()
+{
+    open_drm_device();
 
     ctx.gbm = gbm_create_device(ctx.fd);
     printf("backend name: %s\n", gbm_device_get_backend_name(ctx.gbm));
