@@ -510,6 +510,7 @@ static void render()
         glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
                 (GLfloat)ctx.tex_width, (GLfloat)ctx.tex_height);
         glDrawArrays(GL_TRIANGLES, 0, 6);
+        glFinish();
 
 
         glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb[1]);
