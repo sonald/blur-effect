@@ -42,6 +42,7 @@ static struct context {
     GLuint program, programH, programDirect, programSaveBrt, programSetBrt;
     GLuint vbo;
     GLuint tex;
+    GLuint ubo;
 
     GLuint fbTex[2]; // texture attached to offscreen fb
     GLuint fb[2];
@@ -144,9 +145,11 @@ in vec2 texCoord;
 
 out vec4 outColor;
 
-uniform float kernel[41];
-
-uniform vec2 resolution;
+layout (std140) uniform BlurData 
+{
+    float kernel[44];
+    vec2 resolution;
+};
 uniform sampler2D sampler;
 
 void main() {   
@@ -169,9 +172,11 @@ in vec3 fragColor;
 in vec2 texCoord;
 
 out vec4 outColor;
-uniform float kernel[41];
-
-uniform vec2 resolution;
+layout (std140) uniform BlurData 
+{
+    float kernel[44];
+    vec2 resolution;
+};
 uniform sampler2D sampler;
 
 void main() {
@@ -351,6 +356,11 @@ static void gl_init()
 {
     glViewport(0, 0, ctx.width, ctx.height);
 
+#ifndef __mips__
+    build_gaussian_blur_kernel(&radius, &kernel[1], &kernel[21]);
+    kernel[0] = radius;
+#endif
+
     glGenBuffers(1, &ctx.vbo);
     glBindBuffer(GL_ARRAY_BUFFER, ctx.vbo);
 
@@ -364,7 +374,6 @@ static void gl_init()
         -1.0f, -1.0f,  0.0f, 1.0f, 0.0f,  0.0f, 0.0f
     };
     glBufferData(GL_ARRAY_BUFFER, sizeof(vdata), &vdata, GL_STATIC_DRAW);
-
 
     glGenTextures(1, &ctx.tex);
     glBindTexture(GL_TEXTURE_2D, ctx.tex);
@@ -419,11 +428,6 @@ static void gl_init()
     }
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-#ifndef __mips__
-    build_gaussian_blur_kernel(&radius, &kernel[1], &kernel[21]);
-    kernel[0] = radius;
-#endif
 }
 
 static void adjust_brightness()
@@ -493,6 +497,40 @@ static void render()
         err_quit("program is invalid\n");
     }
 
+    GLuint bindingPoint = 1;
+	GLuint blockId = glGetUniformBlockIndex(ctx.program, "BlurData");
+    glUniformBlockBinding (ctx.program, blockId, bindingPoint);
+
+	blockId = glGetUniformBlockIndex(ctx.programH, "BlurData");
+    glUniformBlockBinding (ctx.programH, blockId, bindingPoint);
+
+
+    glGenBuffers(1, &ctx.ubo);
+    glBindBuffer(GL_UNIFORM_BUFFER, ctx.ubo);
+    glBindBufferBase(GL_UNIFORM_BUFFER, bindingPoint, ctx.ubo);
+
+    const GLchar* names[] = {"kernel", "resolution"};
+    GLuint indices[2];
+    GLint sizes[2], strides[2];
+    glGetUniformIndices(ctx.program, 2, names, indices);
+    glGetActiveUniformsiv(ctx.program, 2, indices, GL_UNIFORM_SIZE, sizes);
+    glGetActiveUniformsiv(ctx.program, 2, indices, GL_UNIFORM_ARRAY_STRIDE, strides);
+
+
+    // std140 padding is considered
+    int ubo_sz = sizes[0]*strides[0] + sizes[1]*sizeof(GLfloat)*4;
+    cerr << "total ubo size = " << ubo_sz << endl;
+    GLchar udata[ubo_sz];
+    memset(udata, 0, ubo_sz);
+
+    for (int i = 0; i < sizes[0]; i++) {
+        *(GLfloat*)(udata + i*strides[0]) = kernel[i];
+    }
+
+    *(GLfloat*)(udata + sizes[0]*strides[0]) = (GLfloat)ctx.tex_width;
+    *((GLfloat*)(udata + sizes[0]*strides[0]) + 1) = (GLfloat)ctx.tex_height;
+    glBufferData(GL_UNIFORM_BUFFER, ubo_sz, udata, GL_STATIC_DRAW);
+
     glBindBuffer(GL_ARRAY_BUFFER, ctx.vbo);
 
     glDisable(GL_DEPTH_TEST);
@@ -505,22 +543,20 @@ static void render()
         glBindTexture(GL_TEXTURE_2D, tex1);
         glUseProgram(ctx.program);
 #ifndef __mips__
-        glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 41, kernel);
+        //glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 41, kernel);
 #endif
-        glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
-                (GLfloat)ctx.tex_width, (GLfloat)ctx.tex_height);
+        //glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
+                //(GLfloat)ctx.tex_width, (GLfloat)ctx.tex_height);
         glDrawArrays(GL_TRIANGLES, 0, 6);
-        glFinish();
-
 
         glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb[1]);
         glBindTexture(GL_TEXTURE_2D, ctx.fbTex[0]);
         glUseProgram(ctx.programH);
 #ifndef __mips__
-        glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 41, kernel);
+        //glUniform1fv(glGetUniformLocation(ctx.programH, "kernel"), 41, kernel);
 #endif
-        glUniform2f(glGetUniformLocation(ctx.programH, "resolution"),
-                (GLfloat)ctx.tex_width, (GLfloat)ctx.tex_height);
+        //glUniform2f(glGetUniformLocation(ctx.programH, "resolution"),
+                //(GLfloat)ctx.tex_width, (GLfloat)ctx.tex_height);
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
 
@@ -621,7 +657,7 @@ static void open_best_device()
     std::cerr << "try to open " << card << endl;
     ctx.fd = open(card.c_str(), O_RDWR|O_CLOEXEC|O_NONBLOCK);
     if (ctx.fd < 0) { 
-        err_quit(strerror(errno));
+        err_quit("%s\n", strerror(errno));
     }
 }
 
