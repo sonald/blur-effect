@@ -6,13 +6,13 @@ project(${target})
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS on)
 #set(CMAKE_CXX_COMPILER "clang++")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Wall -Wno-error")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -Wall -Werror")
 
 set(blur-exps_VERSION_MAJOR 0)
 set(blur-exps_VERSION_MINOR 1)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(DEPS REQUIRED glew glfw3)
+pkg_check_modules(DEPS REQUIRED glew glfw3 gdk-pixbuf-2.0)
 pkg_check_modules(DEPS2 REQUIRED gdk-pixbuf-2.0 libdrm gbm egl glesv2)
 
 # Find includes in corresponding build directories

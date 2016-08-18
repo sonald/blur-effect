@@ -1,13 +1,12 @@
 #include <iostream>
+#include <cassert>
+#include <cmath>
 #define GLEW_STATIC
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
 
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
-#define STB_IMAGE_RESIZE_IMPLEMENTATION
-#include "stb_image_resize.h"
-
+#include <glib.h>
+#include <gdk-pixbuf/gdk-pixbuf.h>
 using namespace std;
 
 #define err_quit(fmt, ...) do { \
@@ -229,24 +228,20 @@ static void gl_init()
     glBindTexture(GL_TEXTURE_2D, ctx.tex);
 
     int x,y,n;
-    unsigned char *pixbuf = stbi_load("./texture.jpg", &x, &y, &n, 0);
+    
+
+    GError *error = NULL;
+    GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file("./texture.jpg", &error);
     if (!pixbuf) {
         err_quit("load texture.jpg failed\n");
     }
+    unsigned char *data = gdk_pixbuf_get_pixels(pixbuf);
+    n = gdk_pixbuf_get_n_channels(pixbuf);
+    x = gdk_pixbuf_get_width(pixbuf);
+    y = gdk_pixbuf_get_height(pixbuf);
 
-    if (x >= ctx.width && y >= ctx.height) {
-        cerr << "down scale texture\n";
-        float scale = fminf(ctx.width / (float)x, ctx.height / (float)y);
-        int ox = x * scale, oy = y * scale;
-        unsigned char* output = (unsigned char*)malloc(n*ox*oy);
-        stbir_resize_uint8(pixbuf, x, y, 0, output, ox, oy, 0, n);
-        stbi_image_free(pixbuf);
-        x = ox;
-        y = oy;
-        pixbuf = output;
-    }
     glTexImage2D(GL_TEXTURE_2D, 0, n == 4 ? GL_RGBA : GL_RGB, x, y, 0,
-            n == 4 ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, pixbuf);
+            n == 4 ? GL_RGBA : GL_RGB, GL_UNSIGNED_BYTE, data);
     glGenerateMipmap(GL_TEXTURE_2D);
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
@@ -255,7 +250,7 @@ static void gl_init()
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     glBindTexture(GL_TEXTURE_2D, 0);
-    stbi_image_free(pixbuf);
+    g_object_unref(pixbuf);
 
 
     glGenTextures(2, ctx.fbTex);
