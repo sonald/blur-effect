@@ -620,7 +620,7 @@ static void open_best_device()
     std::cerr << "try to open " << card << endl;
     ctx.fd = open(card.c_str(), O_RDWR|O_CLOEXEC|O_NONBLOCK);
     if (ctx.fd < 0) { 
-        err_quit(strerror(errno));
+        err_quit("%s\n", strerror(errno));
     }
 }
 
