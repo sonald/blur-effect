@@ -10,6 +10,7 @@
 #include <iostream>
 #include <algorithm>
 #include <vector>
+#include <unordered_map>
 
 #include <gbm.h>
 #include <GLES3/gl3.h>
@@ -60,6 +61,11 @@ static int rounds = 1;
 static char* infile = NULL, *outfile = NULL, *drmdev = NULL;
 bool adjustBrightness = false;
 
+// must be odd
+static GLint radius = 19;
+static GLfloat kernel[41];
+
+
 /** shaders work on OpenGL ES 3.0 */
 const GLchar* ts_code = R"(
 #version 300 es
@@ -79,62 +85,6 @@ void main() {
 }
 )";
 
-#ifdef __mips__
-
-const GLchar* vs_code = R"(
-#version 300 es
-#define texpick textureLod
-precision highp float;
-
-in vec3 fragColor;
-in vec2 texCoord;
-
-out vec4 outColor;
-
-float kernel[9] = float[](0.176204,0.160186,0.120139,0.0739318,0.0369659,0.0147864,0.00462074,0.00108723,0.000181205);
-
-uniform vec2 resolution;
-uniform sampler2D sampler;
-
-void main() {
-    float lod = 0.0;
-    outColor = texpick(sampler, texCoord, lod) * kernel[0];
-    int limit = 9;
-    for (int i = 1; i < limit; i++) {
-        outColor += texpick(sampler, texCoord.st - vec2(0.0, float(i)/resolution.y), lod) * kernel[i];
-        outColor += texpick(sampler, texCoord.st + vec2(0.0, float(i)/resolution.y), lod) * kernel[i];
-    }
-}
-)";
-
-
-const GLchar* vs_code_h = R"(
-#version 300 es
-#define texpick textureLod
-precision highp float;
-
-in vec3 fragColor;
-in vec2 texCoord;
-
-out vec4 outColor;
-float kernel[9] = float[](0.176204,0.160186,0.120139,0.0739318,0.0369659,0.0147864,0.00462074,0.00108723,0.000181205);
-
-uniform vec2 resolution;
-uniform sampler2D sampler;
-
-void main() {
-    float lod = 0.0;
-    vec2 tc = vec2(texCoord.s, texCoord.t);
-    outColor = texpick(sampler, tc, lod) * kernel[0];
-    int limit = 9;
-    for (int i = 1; i < limit; i++) {
-        outColor += texpick(sampler, tc + vec2(float(i)/resolution.x, 0.0), lod) * kernel[i];
-        outColor += texpick(sampler, tc - vec2(float(i)/resolution.x, 0.0), lod) * kernel[i];
-    }
-}
-)";
-
-#else
 const GLchar* vs_code = R"(
 #version 300 es
 #define texpick textureLod
@@ -155,7 +105,7 @@ uniform sampler2D sampler;
 void main() {   
     float lod = 0.0;
     outColor = texpick(sampler, texCoord, lod) * kernel[21];
-    int limit = int(kernel[0]);
+    int limit = %d;
     for (int i = 1; i < limit; i++) {
         outColor += texpick(sampler, texCoord.st - vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
         outColor += texpick(sampler, texCoord.st + vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
@@ -183,15 +133,13 @@ void main() {
     float lod = 0.0;
     vec2 tc = vec2(texCoord.s, texCoord.t);
     outColor = texpick(sampler, tc, lod) * kernel[21];
-    int limit = int(kernel[0]);
+    int limit = %d;
     for (int i = 1; i < limit; i++) {
         outColor += texpick(sampler, tc + vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
         outColor += texpick(sampler, tc - vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
     }
 }
 )";
-
-#endif
 
 const GLchar* vs_direct = R"(
 #version 300 es
@@ -268,14 +216,21 @@ static GLuint build_shader(const GLchar* code, GLint type)
     return shader;
 }
 
+static const char* build_shader_template(const char* shader_tmpl, int size)
+{
+    char* ret = (char*)malloc(strlen(shader_tmpl)+1);
+    sprintf(ret, shader_tmpl, size);
+    return ret;
+}
+
 static GLuint build_program(int stage)
 {
     GLuint program = glCreateProgram();
 
     GLuint ts = build_shader(ts_code, GL_VERTEX_SHADER);
     glAttachShader(program, ts);
-    const GLchar* vs_src = stage == 1 ? vs_code :
-        stage == 2 ? vs_code_h : 
+    const GLchar* vs_src = stage == 1 ? build_shader_template(vs_code, (int)kernel[0]) :
+        stage == 2 ? build_shader_template(vs_code_h, (int)kernel[0]) : 
         stage == 3 ? vs_direct : 
         stage == 4 ? vs_save_brightness : vs_set_brightness;
     GLuint vs = build_shader(vs_src, GL_FRAGMENT_SHADER);
@@ -309,10 +264,6 @@ static GLuint build_program(int stage)
 
     return program;
 }
-
-// must be odd
-static GLint radius = 19;
-static GLfloat kernel[41];
 
 static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat* weight)
 {
@@ -356,10 +307,8 @@ static void gl_init()
 {
     glViewport(0, 0, ctx.width, ctx.height);
 
-#ifndef __mips__
     build_gaussian_blur_kernel(&radius, &kernel[1], &kernel[21]);
     kernel[0] = radius;
-#endif
 
     glGenBuffers(1, &ctx.vbo);
     glBindBuffer(GL_ARRAY_BUFFER, ctx.vbo);
@@ -542,21 +491,11 @@ static void render()
         glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb[0]);
         glBindTexture(GL_TEXTURE_2D, tex1);
         glUseProgram(ctx.program);
-#ifndef __mips__
-        //glUniform1fv(glGetUniformLocation(ctx.program, "kernel"), 41, kernel);
-#endif
-        //glUniform2f(glGetUniformLocation(ctx.program, "resolution"),
-                //(GLfloat)ctx.tex_width, (GLfloat)ctx.tex_height);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
         glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb[1]);
         glBindTexture(GL_TEXTURE_2D, ctx.fbTex[0]);
         glUseProgram(ctx.programH);
-#ifndef __mips__
-        //glUniform1fv(glGetUniformLocation(ctx.programH, "kernel"), 41, kernel);
-#endif
-        //glUniform2f(glGetUniformLocation(ctx.programH, "resolution"),
-                //(GLfloat)ctx.tex_width, (GLfloat)ctx.tex_height);
         glDrawArrays(GL_TRIANGLES, 0, 6);
     }
 
