@@ -5,6 +5,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <libgen.h>
 
 #include <iostream>
@@ -40,7 +41,8 @@ static struct context {
     int width, height, ncomp;
     unsigned char* img_data;
 
-    GLuint program, programH, programDirect, programSaveBrt, programSetBrt;
+    GLuint program, programH, programDirect, programSaveBrt,
+           programSetBrt, programSetLgt;
     GLuint vbo;
     GLuint tex;
     GLuint ubo;
@@ -50,7 +52,12 @@ static struct context {
 
     GLuint brtFb;
     GLuint brtTex; // texture for brightness info
+
     bool brightnessAdjusted;
+
+    GLuint lgtFb;
+    GLuint lgtTex; // for lightness
+    bool lightnessAdjusted;
 
     int tex_width, tex_height;
 } ctx = {
@@ -60,6 +67,9 @@ static struct context {
 static int rounds = 1;
 static char* infile = NULL, *outfile = NULL, *drmdev = NULL;
 bool adjustBrightness = false;
+bool adjustHSL = false;
+GLfloat lightness = 1.0f;
+GLfloat saturation = 1.0f;
 
 // must be odd
 static GLint radius = 19;
@@ -196,6 +206,94 @@ void main() {
 }
 )";
 
+// from http://www.chilliant.com/rgb2hsv.html
+const GLchar* vs_set_lightness = R"(
+#version 300 es
+precision highp float;
+
+in vec3 fragColor;
+in vec2 texCoord;
+
+out vec4 outColor;
+uniform sampler2D sampler;
+
+const float lightness = %f;
+const float saturation = %f;
+const float Epsilon = 1e-10;
+ 
+float hue2rgb(float f1, float f2, float hue) {
+    if (hue < 0.0)
+        hue += 1.0;
+    else if (hue > 1.0)
+        hue -= 1.0;
+    float res;
+    if ((6.0 * hue) < 1.0)
+        res = f1 + (f2 - f1) * 6.0 * hue;
+    else if ((2.0 * hue) < 1.0)
+        res = f2;
+    else if ((3.0 * hue) < 2.0)
+        res = f1 + (f2 - f1) * ((2.0 / 3.0) - hue) * 6.0;
+    else
+        res = f1;
+    return res;
+}
+
+vec3 HSLtoRGB(vec3 hsl) {
+    vec3 rgb;
+    
+    if (hsl.y == 0.0) {
+        rgb = vec3(hsl.z); // Luminance
+    } else {
+        float f2;
+        
+        if (hsl.z < 0.5)
+            f2 = hsl.z * (1.0 + hsl.y);
+        else
+            f2 = hsl.z + hsl.y - hsl.y * hsl.z;
+            
+        float f1 = 2.0 * hsl.z - f2;
+        
+        rgb.r = hue2rgb(f1, f2, hsl.x + (1.0/3.0));
+        rgb.g = hue2rgb(f1, f2, hsl.x);
+        rgb.b = hue2rgb(f1, f2, hsl.x - (1.0/3.0));
+    }   
+    return rgb;
+}
+
+vec3 RGBtoHSL(vec3 rgb) {
+    float r = rgb.r;
+    float g = rgb.g;
+    float b = rgb.b;
+
+    float p = max(max(r, g), b), q = min(min(r, g), b);
+    float h, s, l = (p + q) / 2.0;
+
+    if(p == q) {
+        h = s = 0.0;
+    }else{
+        float d = p - q;
+        s = l > 0.5 ? d / (2.0 - p - q) : d / (p + q);
+        if (p == r) {
+            h = (g - b) / d + (g < b ? 6.0 : 0.0);
+        } else if (p == g) {
+            h = (b - r) / d + 2.0;
+        } else {
+            h = (r - g) / d + 4.0;
+        }
+        h /= 6.0;
+    }
+
+    return vec3(h, s, l);
+}
+
+void main() {
+    vec4 clr = texture(sampler, texCoord.st);
+    vec3 hsl = RGBtoHSL(clr.rgb);
+    outColor = vec4(HSLtoRGB(vec3(hsl.x, hsl.y * saturation, hsl.z * lightness)), clr.a);
+}
+
+)";
+
 static GLuint build_shader(const GLchar* code, GLint type)
 {
     GLuint shader = glCreateShader(type);
@@ -209,17 +307,23 @@ static GLuint build_shader(const GLchar* code, GLint type)
         if (result == GL_FALSE) {
             GLchar log[1024];
             glGetShaderInfoLog(shader, sizeof log - 1, NULL, log);
-            cerr << log << endl;
+            err_quit("error: %s\n", log);
         }
     }
 
     return shader;
 }
 
-static const char* build_shader_template(const char* shader_tmpl, int size)
+static char* build_shader_template(const char* shader_tmpl, ...)
 {
-    char* ret = (char*)malloc(strlen(shader_tmpl)+1);
-    sprintf(ret, shader_tmpl, size);
+    char* ret = (char*)malloc(strlen(shader_tmpl)+40);
+    if (!ret) {
+        err_quit("no memory\n");
+    }
+    va_list va;
+    va_start(va, shader_tmpl);
+    vsprintf(ret, shader_tmpl, va);
+    va_end(va);
     return ret;
 }
 
@@ -229,11 +333,19 @@ static GLuint build_program(int stage)
 
     GLuint ts = build_shader(ts_code, GL_VERTEX_SHADER);
     glAttachShader(program, ts);
-    const GLchar* vs_src = stage == 1 ? build_shader_template(vs_code, (int)kernel[0]) :
-        stage == 2 ? build_shader_template(vs_code_h, (int)kernel[0]) : 
-        stage == 3 ? vs_direct : 
-        stage == 4 ? vs_save_brightness : vs_set_brightness;
+
+    GLchar* vs_src = NULL;
+    switch (stage) {
+        case 1: vs_src = build_shader_template(vs_code, (int)kernel[0]); break;
+        case 2: vs_src = build_shader_template(vs_code_h, (int)kernel[0]); break;
+        case 3: vs_src = strdup(vs_direct); break;
+        case 4: vs_src = strdup(vs_save_brightness); break;
+        case 5: vs_src = strdup(vs_set_brightness); break;
+        case 6: vs_src = build_shader_template(vs_set_lightness, lightness, saturation); break;
+        default: break;
+    } 
     GLuint vs = build_shader(vs_src, GL_FRAGMENT_SHADER);
+    free(vs_src);
     glAttachShader(program, vs);
 
     glLinkProgram(program);
@@ -242,7 +354,7 @@ static GLuint build_program(int stage)
     if (result == GL_FALSE) {
         GLchar log[1024];
         glGetProgramInfoLog(program, sizeof log - 1, NULL, log);
-        cerr << log << endl;
+        err_quit("error: %s\n", log);
     }
 
     GLint pos_attrib = glGetAttribLocation(program, "position");
@@ -371,9 +483,14 @@ static void gl_init()
     ctx.program = build_program(1);
     ctx.programH = build_program(2);
     ctx.programDirect = build_program(3);
+
     if (adjustBrightness) {
         ctx.programSaveBrt = build_program(4);
         ctx.programSetBrt = build_program(5);
+    }
+
+    if (adjustHSL) {
+        ctx.programSetLgt = build_program(6);
     }
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -429,6 +546,39 @@ static void adjust_brightness()
         glDrawArrays(GL_TRIANGLES, 0, 6);
         ctx.brightnessAdjusted = true;
     }
+}
+
+static void adjust_hsl()
+{
+    glGenTextures(1, &ctx.lgtTex);
+    glBindTexture(GL_TEXTURE_2D, ctx.lgtTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ctx.tex_width, ctx.tex_height,
+            0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    GLenum err;
+    if ((err = glGetError()) != GL_NO_ERROR) {
+        fprintf(stderr, "texture error %x\n", err);
+    }
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glGenFramebuffers(1, &ctx.lgtFb);
+    glBindFramebuffer(GL_FRAMEBUFFER, ctx.lgtFb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ctx.lgtTex, 0);
+
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        err_quit("framebuffer create failed\n");
+    }
+
+    // update brightness
+    glBindTexture(GL_TEXTURE_2D, ctx.fbTex[1]);
+    glUseProgram(ctx.programSetLgt);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    ctx.lightnessAdjusted = true;
 }
 
 static void render()
@@ -501,12 +651,16 @@ static void render()
 
     if (adjustBrightness) {
         adjust_brightness();
+    } else if (adjustHSL) {
+        adjust_hsl();
     }
     
     glViewport(0, 0, ctx.width, ctx.height);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     if (ctx.brightnessAdjusted)
         glBindTexture(GL_TEXTURE_2D, ctx.brtTex);
+    else if (ctx.lightnessAdjusted)
+        glBindTexture(GL_TEXTURE_2D, ctx.lgtTex);
     else
         glBindTexture(GL_TEXTURE_2D, ctx.fbTex[1]);
     glUseProgram(ctx.programDirect);
@@ -695,25 +849,42 @@ static void cleanup()
 static void usage()
 {
     err_quit("usage: blur_image infile -o outfile \n"
-            "\t[-r radius] radius now should be odd number ranging [3-19], disabled for loongson\n"
+            "\t[-r radius] radius now should be odd number ranging [3-19]\n"
             "\t[-b] adjust brightness after blurring\n"
             "\t[-d drmdev] use drmdev (/dev/dri/card0 e.g) to render\n"
+            "\t[-l percent] multiple current lightness by percent [0.0-1.0] \n"
+            "\t[-s percent] multiple current saturation by percent [0.0-1.0] \n"
             "\t[-p rendering passes] iterate passes of rendering, raning [1-INF]\n");
 }
 
 int main(int argc, char *argv[])
 {
     int ch;
-    while ((ch = getopt(argc, argv, "d:o:r:p:bh")) != -1) {
+    while ((ch = getopt(argc, argv, "d:o:r:p:bl:s:h")) != -1) {
         switch(ch) {
             case 'd': drmdev = strdup(optarg); break;
             case 'o': outfile = strdup(optarg); break;
             case 'r': radius = atoi(optarg); break;
             case 'p': rounds = atoi(optarg); break;
             case 'b': adjustBrightness = true; break;
+            case 'l': adjustHSL = true; lightness = (GLfloat)atof(optarg); break;
+            case 's': adjustHSL = true; saturation = (GLfloat)atof(optarg); break;
             case 'h': 
             default: usage(); break;
         }
+    }
+
+    radius = max(min(radius, 19), 3);
+    radius = ((radius >> 1) << 1) + 1;
+
+    if (adjustHSL) {
+        lightness = fmaxf(0.0, fminf(1.0, lightness));
+        saturation = fmaxf(0.0, fminf(1.0, saturation));
+    }
+
+    if (adjustHSL && adjustBrightness) {
+        cerr << "-b and -l/-s can not be used at the same time." << endl;
+        usage();
     }
 
     if (optind < argc && !infile) {
@@ -724,7 +895,9 @@ int main(int argc, char *argv[])
         usage();
     }
 
-    cout << "outfile: " << outfile << ", infile: " << infile << ", r: " << radius << ", p: " << rounds << endl;
+    cout << "outfile: " << outfile << ", infile: " << infile << ", r: " << radius
+        << ", p: " << rounds  << ", l: " << lightness << ", s: " << saturation << endl;
+
     ctx.img_path = strdup(infile);
     GError *error = NULL;
     GdkPixbuf* pixbuf = gdk_pixbuf_new_from_file(infile, &error);
