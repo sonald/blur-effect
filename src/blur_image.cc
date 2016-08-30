@@ -289,7 +289,9 @@ vec3 RGBtoHSL(vec3 rgb) {
 void main() {
     vec4 clr = texture(sampler, texCoord.st);
     vec3 hsl = RGBtoHSL(clr.rgb);
-    outColor = vec4(HSLtoRGB(vec3(hsl.x, hsl.y * saturation, hsl.z * lightness)), clr.a);
+    hsl.y = clamp(hsl.y * saturation, 0.0, 1.0);
+    hsl.z = clamp(hsl.z * lightness, 0.0, 1.0);
+    outColor = vec4(HSLtoRGB(hsl), clr.a);
 }
 
 )";
@@ -878,8 +880,8 @@ int main(int argc, char *argv[])
     radius = ((radius >> 1) << 1) + 1;
 
     if (adjustHSL) {
-        lightness = fmaxf(0.0, fminf(1.0, lightness));
-        saturation = fmaxf(0.0, fminf(1.0, saturation));
+        lightness = fmaxf(0.0, fminf(255.0, lightness));
+        saturation = fmaxf(0.0, fminf(255.0, saturation));
     }
 
     if (adjustHSL && adjustBrightness) {
