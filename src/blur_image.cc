@@ -75,7 +75,8 @@ static GLfloat sigma = 1.0;
 
 // must be odd
 static GLint radius = 19;
-static GLfloat kernel[41];
+// big enough storage for radius maximum of 49
+static GLfloat kernel[101];
 
 
 /** shaders work on OpenGL ES 3.0 */
@@ -99,7 +100,7 @@ void main() {
 
 const GLchar* vs_code = R"(
 #version 300 es
-#define texpick textureLod
+#define texpick texture2D
 precision highp float;
 
 in vec3 fragColor;
@@ -109,25 +110,24 @@ out vec4 outColor;
 
 layout (std140) uniform BlurData 
 {
-    float kernel[44];
+    float kernel[104];
     vec2 resolution;
 };
 uniform sampler2D sampler;
 
 void main() {   
-    float lod = 0.0;
-    outColor = texpick(sampler, texCoord, lod) * kernel[21];
+    outColor = texpick(sampler, texCoord) * kernel[51];
     int limit = %d;
     for (int i = 1; i < limit; i++) {
-        outColor += texpick(sampler, texCoord.st - vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
-        outColor += texpick(sampler, texCoord.st + vec2(0.0, kernel[1+i]/resolution.y), lod) * kernel[21+i];
+        outColor += texpick(sampler, texCoord.st - vec2(0.0, kernel[1+i]/resolution.y)) * kernel[51+i];
+        outColor += texpick(sampler, texCoord.st + vec2(0.0, kernel[1+i]/resolution.y)) * kernel[51+i];
     }
 }
 )";
 
 const GLchar* vs_code_h = R"(
 #version 300 es
-#define texpick textureLod
+#define texpick texture2D
 precision highp float;
 
 in vec3 fragColor;
@@ -136,19 +136,18 @@ in vec2 texCoord;
 out vec4 outColor;
 layout (std140) uniform BlurData 
 {
-    float kernel[44];
+    float kernel[104];
     vec2 resolution;
 };
 uniform sampler2D sampler;
 
 void main() {
-    float lod = 0.0;
     vec2 tc = vec2(texCoord.s, texCoord.t);
-    outColor = texpick(sampler, tc, lod) * kernel[21];
+    outColor = texpick(sampler, tc) * kernel[51];
     int limit = %d;
     for (int i = 1; i < limit; i++) {
-        outColor += texpick(sampler, tc + vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
-        outColor += texpick(sampler, tc - vec2(kernel[1+i]/resolution.x, 0.0), lod) * kernel[21+i];
+        outColor += texpick(sampler, tc + vec2(kernel[1+i]/resolution.x, 0.0)) * kernel[51+i];
+        outColor += texpick(sampler, tc - vec2(kernel[1+i]/resolution.x, 0.0)) * kernel[51+i];
     }
 }
 )";
@@ -422,7 +421,7 @@ static void gl_init()
 {
     glViewport(0, 0, ctx.width, ctx.height);
 
-    build_gaussian_blur_kernel(&radius, &kernel[1], &kernel[21]);
+    build_gaussian_blur_kernel(&radius, &kernel[1], &kernel[51]);
     kernel[0] = radius;
 
     glGenBuffers(1, &ctx.vbo);
@@ -621,6 +620,7 @@ static void render()
 
     // std140 padding is considered
     int ubo_sz = sizes[0]*strides[0] + sizes[1]*sizeof(GLfloat)*4;
+    cerr << "sizes[0] = " << sizes[0] << ", strides[0] = " << strides[0] << endl;
     cerr << "total ubo size = " << ubo_sz << endl;
     GLchar udata[ubo_sz];
     memset(udata, 0, ubo_sz);
@@ -852,7 +852,7 @@ static void cleanup()
 static void usage()
 {
     err_quit("usage: blur_image infile -o outfile \n"
-            "\t[-r radius] radius now should be odd number ranging [3-19]\n"
+            "\t[-r radius] radius now should be odd number ranging [3-49]\n"
             "\t[-S sigma] sample distance (default 1.0)\n"
             "\t[-b] adjust brightness after blurring\n"
             "\t[-d drmdev] use drmdev (/dev/dri/card0 e.g) to render\n"
@@ -879,7 +879,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    radius = max(min(radius, 19), 3);
+    radius = max(min(radius, 49), 3);
     radius = ((radius >> 1) << 1) + 1;
 
     if (adjustHSL) {
