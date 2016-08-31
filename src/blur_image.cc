@@ -64,12 +64,14 @@ static struct context {
     0,
 };
 
+// all kinds of parameters
 static int rounds = 1;
 static char* infile = NULL, *outfile = NULL, *drmdev = NULL;
-bool adjustBrightness = false;
-bool adjustHSL = false;
-GLfloat lightness = 1.0f;
-GLfloat saturation = 1.0f;
+static bool adjustBrightness = false;
+static bool adjustHSL = false;
+static GLfloat lightness = 1.0f;
+static GLfloat saturation = 1.0f;
+static GLfloat sigma = 1.0;
 
 // must be odd
 static GLint radius = 19;
@@ -395,9 +397,8 @@ static void build_gaussian_blur_kernel(GLint* pradius, GLfloat* offset, GLfloat*
 
     cerr << "N = " << N << ", sum = " << sum << endl;
 
-    GLfloat bias = 1.0;
     for (int i = 0; i < radius; i++) {
-        offset[i] = (GLfloat)i*bias;
+        offset[i] = (GLfloat)i*sigma;
         weight[i] /= sum;
     }
 
@@ -498,7 +499,7 @@ static void gl_init()
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
-static void adjust_brightness()
+static void adjust_brightness(GLuint targetTex)
 {
     glGenTextures(1, &ctx.brtTex);
     glBindTexture(GL_TEXTURE_2D, ctx.brtTex);
@@ -525,7 +526,7 @@ static void adjust_brightness()
         }
 
     // calculate brightness
-    glBindTexture(GL_TEXTURE_2D, ctx.fbTex[1]);
+    glBindTexture(GL_TEXTURE_2D, targetTex);
     glUseProgram(ctx.programSaveBrt);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
@@ -543,14 +544,14 @@ static void adjust_brightness()
     cerr << "brightness: " << total / count << endl;
     if (total / count > 100) {
         // update brightness
-        glBindTexture(GL_TEXTURE_2D, ctx.fbTex[1]);
+        glBindTexture(GL_TEXTURE_2D, targetTex);
         glUseProgram(ctx.programSetBrt);
         glDrawArrays(GL_TRIANGLES, 0, 6);
         ctx.brightnessAdjusted = true;
     }
 }
 
-static void adjust_hsl()
+static void adjust_hsl(GLuint targetTex)
 {
     glGenTextures(1, &ctx.lgtTex);
     glBindTexture(GL_TEXTURE_2D, ctx.lgtTex);
@@ -577,7 +578,7 @@ static void adjust_hsl()
     }
 
     // update brightness
-    glBindTexture(GL_TEXTURE_2D, ctx.fbTex[1]);
+    glBindTexture(GL_TEXTURE_2D, targetTex);
     glUseProgram(ctx.programSetLgt);
     glDrawArrays(GL_TRIANGLES, 0, 6);
     ctx.lightnessAdjusted = true;
@@ -637,8 +638,12 @@ static void render()
     glDisable(GL_DEPTH_TEST);
 
     glViewport(0, 0, ctx.tex_width, ctx.tex_height);
+    if (adjustHSL) {
+        adjust_hsl(ctx.tex);
+    }
+
     for (int i = 0; i < rounds; i++) {
-        GLuint tex1 = i == 0 ? ctx.tex : ctx.fbTex[1];
+        GLuint tex1 = i == 0 ? (adjustHSL?ctx.lgtTex:ctx.tex) : ctx.fbTex[1];
 
         glBindFramebuffer(GL_FRAMEBUFFER, ctx.fb[0]);
         glBindTexture(GL_TEXTURE_2D, tex1);
@@ -652,17 +657,13 @@ static void render()
     }
 
     if (adjustBrightness) {
-        adjust_brightness();
-    } else if (adjustHSL) {
-        adjust_hsl();
-    }
+        adjust_brightness(ctx.fbTex[1]);
+    } 
     
     glViewport(0, 0, ctx.width, ctx.height);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     if (ctx.brightnessAdjusted)
         glBindTexture(GL_TEXTURE_2D, ctx.brtTex);
-    else if (ctx.lightnessAdjusted)
-        glBindTexture(GL_TEXTURE_2D, ctx.lgtTex);
     else
         glBindTexture(GL_TEXTURE_2D, ctx.fbTex[1]);
     glUseProgram(ctx.programDirect);
@@ -852,6 +853,7 @@ static void usage()
 {
     err_quit("usage: blur_image infile -o outfile \n"
             "\t[-r radius] radius now should be odd number ranging [3-19]\n"
+            "\t[-S sigma] sample distance (default 1.0)\n"
             "\t[-b] adjust brightness after blurring\n"
             "\t[-d drmdev] use drmdev (/dev/dri/card0 e.g) to render\n"
             "\t[-l percent] multiple current lightness by percent [0.0-1.0] \n"
@@ -862,11 +864,12 @@ static void usage()
 int main(int argc, char *argv[])
 {
     int ch;
-    while ((ch = getopt(argc, argv, "d:o:r:p:bl:s:h")) != -1) {
+    while ((ch = getopt(argc, argv, "d:o:r:S:p:bl:s:h")) != -1) {
         switch(ch) {
             case 'd': drmdev = strdup(optarg); break;
             case 'o': outfile = strdup(optarg); break;
             case 'r': radius = atoi(optarg); break;
+            case 'S': sigma = atof(optarg); break;
             case 'p': rounds = atoi(optarg); break;
             case 'b': adjustBrightness = true; break;
             case 'l': adjustHSL = true; lightness = (GLfloat)atof(optarg); break;
@@ -882,11 +885,6 @@ int main(int argc, char *argv[])
     if (adjustHSL) {
         lightness = fmaxf(0.0, fminf(255.0, lightness));
         saturation = fmaxf(0.0, fminf(255.0, saturation));
-    }
-
-    if (adjustHSL && adjustBrightness) {
-        cerr << "-b and -l/-s can not be used at the same time." << endl;
-        usage();
     }
 
     if (optind < argc && !infile) {
