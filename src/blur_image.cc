@@ -82,7 +82,7 @@ static GLfloat kernel[101];
 /** shaders work on OpenGL ES 3.0 */
 const GLchar* ts_code = R"(
 #version 300 es
-precision highp float;
+precision mediump float;
 
 in vec2 position;
 in vec3 vertexColor;
@@ -101,7 +101,7 @@ void main() {
 const GLchar* vs_code = R"(
 #version 300 es
 #define texpick texture2D
-precision highp float;
+precision mediump float;
 
 in vec3 fragColor;
 in vec2 texCoord;
@@ -128,7 +128,7 @@ void main() {
 const GLchar* vs_code_h = R"(
 #version 300 es
 #define texpick texture2D
-precision highp float;
+precision mediump float;
 
 in vec3 fragColor;
 in vec2 texCoord;
@@ -154,7 +154,7 @@ void main() {
 
 const GLchar* vs_direct = R"(
 #version 300 es
-precision highp float;
+precision mediump float;
 
 in vec3 fragColor;
 in vec2 texCoord;
@@ -170,7 +170,7 @@ void main() {
 
 const GLchar* vs_save_brightness = R"(
 #version 300 es
-precision highp float;
+precision mediump float;
 
 in vec3 fragColor;
 in vec2 texCoord;
@@ -190,7 +190,7 @@ void main() {
 
 const GLchar* vs_set_brightness = R"(
 #version 300 es
-precision highp float;
+precision mediump float;
 
 in vec3 fragColor;
 in vec2 texCoord;
@@ -210,7 +210,7 @@ void main() {
 // from http://www.chilliant.com/rgb2hsv.html
 const GLchar* vs_set_lightness = R"(
 #version 300 es
-precision highp float;
+precision mediump float;
 
 in vec3 fragColor;
 in vec2 texCoord;
@@ -220,40 +220,42 @@ uniform sampler2D sampler;
 
 const float lightness = %f;
 const float saturation = %f;
-const float Epsilon = 1e-10;
  
 float hue2rgb(float f1, float f2, float hue) {
     if (hue < 0.0)
         hue += 1.0;
     else if (hue > 1.0)
         hue -= 1.0;
+
     float res;
     if ((6.0 * hue) < 1.0)
-        res = f1 + (f2 - f1) * 6.0 * hue;
+        res = (f1 + (f2 - f1) * 6.0 * hue);
     else if ((2.0 * hue) < 1.0)
-        res = f2;
+        res = (f2);
     else if ((3.0 * hue) < 2.0)
-        res = f1 + (f2 - f1) * ((2.0 / 3.0) - hue) * 6.0;
+        res = (f1 + (f2 - f1) * ((2.0 / 3.0) - hue) * 6.0);
     else
-        res = f1;
+        res = (f1);
     return res;
 }
 
 vec3 HSLtoRGB(vec3 hsl) {
     vec3 rgb;
     
-    if (hsl.y == 0.0) {
-        rgb = vec3(hsl.z); // Luminance
+    if (hsl.z <= 0.00001) {
+        return vec3(0.0);
+    }
+    if (hsl.y <= 0.00001) {
+        rgb = vec3(hsl.z);
     } else {
         float f2;
-        
         if (hsl.z < 0.5)
             f2 = hsl.z * (1.0 + hsl.y);
         else
             f2 = hsl.z + hsl.y - hsl.y * hsl.z;
             
         float f1 = 2.0 * hsl.z - f2;
-        
+
         rgb.r = hue2rgb(f1, f2, hsl.x + (1.0/3.0));
         rgb.g = hue2rgb(f1, f2, hsl.x);
         rgb.b = hue2rgb(f1, f2, hsl.x - (1.0/3.0));
@@ -269,33 +271,57 @@ vec3 RGBtoHSL(vec3 rgb) {
     float p = max(max(r, g), b), q = min(min(r, g), b);
     float h, s, l = (p + q) / 2.0;
 
-    if(p == q) {
-        h = s = 0.0;
-    }else{
-        float d = p - q;
-        s = l > 0.5 ? d / (2.0 - p - q) : d / (p + q);
-        if (p == r) {
+    float d = p - q;
+    if (d <= 0.00001) {
+        return vec3(-1.0, 0.0, l);
+    } else {
+        if (l > 0.5)
+            s = d / (2.0 - p - q);
+        else 
+            s = d / (p + q);
+        
+        if (r == p) {
             h = (g - b) / d + (g < b ? 6.0 : 0.0);
-        } else if (p == g) {
+        } else if (g == p) {
             h = (b - r) / d + 2.0;
         } else {
             h = (r - g) / d + 4.0;
         }
-        h /= 6.0;
+        h /=6.0;
+        if (h < 0.0) h += 1.0;
     }
 
     return vec3(h, s, l);
 }
 
+vec3 rgb2hsv(vec3 c)
+{
+    vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);
+    vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+    vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+
+    float d = q.x - min(q.w, q.y);
+    float e = 1.0e-10;
+    return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+}
+
+vec3 hsv2rgb(vec3 c)
+{
+    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
 void main() {
     vec4 clr = texture(sampler, texCoord.st);
-    vec3 hsl = RGBtoHSL(clr.rgb);
-    hsl.y = clamp(hsl.y * saturation, 0.0, 1.0);
-    hsl.z = clamp(hsl.z * lightness, 0.0, 1.0);
-    outColor = vec4(HSLtoRGB(hsl), clr.a);
+    vec3 hsl = rgb2hsv(clr.rgb);
+	hsl.y = hsl.y * saturation;
+	hsl.z = hsl.z * lightness;
+    outColor = vec4(hsv2rgb(hsl), clr.a);
 }
 
 )";
+
 
 static GLuint build_shader(const GLchar* code, GLint type)
 {
@@ -657,7 +683,10 @@ static void render()
     }
 
     if (adjustBrightness) {
-        adjust_brightness(ctx.fbTex[1]);
+        if (rounds == 0) {
+            adjust_brightness(ctx.lgtTex);
+        } else 
+            adjust_brightness(ctx.fbTex[1]);
     } 
     
     glViewport(0, 0, ctx.width, ctx.height);
@@ -665,7 +694,7 @@ static void render()
     if (ctx.brightnessAdjusted)
         glBindTexture(GL_TEXTURE_2D, ctx.brtTex);
     else
-        glBindTexture(GL_TEXTURE_2D, ctx.fbTex[1]);
+        glBindTexture(GL_TEXTURE_2D, rounds == 0 ? ctx.lgtTex: ctx.fbTex[1]);
     glUseProgram(ctx.programDirect);
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
