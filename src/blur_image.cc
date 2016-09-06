@@ -710,7 +710,8 @@ static bool is_device_viable(int id)
     fscanf(fp, "%d", &enabled);
     fclose(fp);
 
-    return enabled == 1;
+    // nouveau write 2, others 1
+    return enabled > 0;
 }
 
 static string choose_best_card(const vector<string>& vs)
