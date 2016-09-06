@@ -887,6 +887,10 @@ int main(int argc, char *argv[])
         saturation = fmaxf(0.0, fminf(255.0, saturation));
     }
 
+#if defined(__alpha__) || defined(__sw_64__) || defined(__mips__)
+    adjustHSL = false; // force it
+#endif
+
     if (optind < argc && !infile) {
         infile = strdup(argv[optind]);
     }
